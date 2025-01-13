@@ -42,7 +42,7 @@ target_link_libraries(ConcurrentTests gtest gtest_main pthread -fsanitize=addres
 target_link_libraries(SequentialTests gtest gtest_main pthread -fsanitize=address)
 
 enable_testing()
-add_test(NAME Concurrent COMMAND ConcurrentTests)
 add_test(NAME Sequential COMMAND SequentialTests)
+add_test(NAME Concurrent COMMAND ConcurrentTests)
 
 
