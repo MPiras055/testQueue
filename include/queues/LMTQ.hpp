@@ -141,7 +141,6 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid){
-        //puts("POPPING");
         size_t headTicket,idx;
         Cell *node;
         size_t bk = BACKOFF_MIN;
@@ -164,15 +163,8 @@ public:
                 bk &= BACKOFF_MAX;
             }
             else if (diff < 0){ //check if queue is empty
-                if constexpr (bounded){
-                    if(Base::tail.load() <= headTicket){
-                        return nullptr;
-                    }
-                }
-                else{
-                    if(Base::tailIndex(Base::tail.load()) <= headTicket)
-                        return nullptr;
-                }
+                if(Base::isEmpty())
+                    return nullptr;
             }
         }
 
