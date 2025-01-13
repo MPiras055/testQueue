@@ -24,5 +24,5 @@ void random_work(size_t inf,size_t sup){
     assert(inf <= sup);
 #endif
     std::uniform_int_distribution<int> dis(inf, sup); // Distribution between min and max
-    loop(dis(random_engine));   //call loop function (doesn't get optimized);
+    loop(dis(random_engine));   //call loop function (shoudn't get optimized);
 }

@@ -8,23 +8,21 @@
 #endif
 
 
-/*
- *  Dichiarazione delle strutture che immagazzinano i singoli
- *  valori dei buffer;
- * 
- *  Doppia definizione: padding a linea di cache oppure no;
- *  
- */
-
 
 namespace detail{
 
+/**
+ * @brief check if a number is a power of 2
+ */
 inline bool isPowTwo(size_t x){
     return (x != 0 && (x & (x-1)) == 0);
 }
 
+/**
+ * @brief returns the next power of 2
+ */
 inline size_t nextPowTwo(size_t x){
-    if(isPowTwo(x)) return x;
+    if(isPowTwo(x)) x++;
     size_t p=1;
     while (x>p) p <<= 1;
     return p;

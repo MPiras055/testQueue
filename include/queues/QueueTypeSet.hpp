@@ -2,8 +2,6 @@
 
 #include "TemplateSet.hpp"
 
-//TODO: Add fastflow queue Implementation
-
 #include "LCRQ.hpp"
 #include "LPRQ.hpp"
 #include "FAArray.hpp"
