@@ -14,6 +14,15 @@ struct Data{
     Data(int tid,size_t val): tid(tid), val(val){};
 };
 
+//Uses a struct pointer to pass arguments to thread
+struct threadArgs{
+    std::barrier<>* threadBarrier;
+    size_t numOps;
+    size_t min_wait;
+    size_t max_wait;
+    size_t threads;
+};
+
 
 /**
  * @brief Thread routine for benchmark
@@ -33,11 +42,14 @@ struct Data{
  * is strictly lower than the current one.
  */
 template<template <typename> typename Q>
-void threadRoutine(Q<Data> * queue, std::barrier<>* threadBarrier, size_t numOps, size_t min_wait, size_t max_wait, int threads ,const int tid){
+void threadRoutine(Q<Data> * queue, threadArgs* shared_args ,const int tid){
+    const size_t numOps   = shared_args->numOps;
+    const size_t min_wait = shared_args->min_wait;
+    const size_t max_wait = shared_args->max_wait;
 #ifndef DEBUG   
     Data item(tid,0);
 #else
-    std::vector<size_t> lastValue(threads,0);
+    std::vector<size_t> lastValue(shared_args->threads,0);
     std::vector<Data> items(numOps);
     for(size_t i = 0; i< numOps; i++){
         items[i].tid = tid;
@@ -45,7 +57,7 @@ void threadRoutine(Q<Data> * queue, std::barrier<>* threadBarrier, size_t numOps
     }
 #endif
 
-    threadBarrier->arrive_and_wait();
+    (shared_args->threadBarrier)->arrive_and_wait();
     for(size_t i = 0; i < numOps; i++){
 #ifdef DEBUG
     Data& item = items[i];
@@ -70,7 +82,7 @@ void threadRoutine(Q<Data> * queue, std::barrier<>* threadBarrier, size_t numOps
         }  
 #endif
     }
-    threadBarrier->arrive_and_wait();
+    (shared_args->threadBarrier)->arrive_and_wait();
     return;
 }
 
@@ -101,8 +113,15 @@ long double benchmark(size_t numThreads,size_t size_queue, size_t numOps, size_t
     std::barrier<> threadBarrier(numThreads + 1);
 
     std::vector<std::thread> threads;
+    threadArgs arg;
+    arg.threadBarrier = &threadBarrier;
+    arg.numOps = numOps;
+    arg.min_wait = min_wait;
+    arg.max_wait = max_wait;
+    arg.threads = numThreads;
+
     for (int tid = 0; tid < numThreads; tid++) {
-        threads.emplace_back(threadRoutine<Q>,&queue, &threadBarrier, numOps, min_wait, max_wait, numThreads, tid);
+        threads.emplace_back(threadRoutine<Q>,&queue,&arg, tid);
     }
 
     threadBarrier.arrive_and_wait();
