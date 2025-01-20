@@ -1,7 +1,6 @@
 #include "gtest/gtest.h"
 
 #include "QueueTypeSet.hpp"
-#include "ThreadGroup.hpp"
 
 /**
  * Type aliases for queue definition

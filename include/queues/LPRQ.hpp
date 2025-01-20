@@ -1,21 +1,22 @@
 #pragma once
-
+#include <iostream>
 #include <atomic>
 #include "LinkedRingQueue.hpp"
+#include "BoundedElementCounter.hpp"
 #include "RQCell.hpp"
+#include <iostream>
 
-
-template<typename T,bool padded_cells, bool bounded>
-class PRQueue : public QueueSegmentBase<T, PRQueue<T,padded_cells,bounded>> {
+template<typename T,bool padded_cells>
+class PRQueue : public QueueSegmentBase<T, PRQueue<T,padded_cells>> {
 private:
-    using Base = QueueSegmentBase<T,PRQueue<T,padded_cells,bounded>>;
+    using Base = QueueSegmentBase<T,PRQueue<T,padded_cells>>;
     using Cell = detail::CRQCell<void*,padded_cells>;
-    
     Cell* array; 
     const size_t sizeRing;
 #ifndef DISABLE_POW2
     const size_t mask;  //Mask to execute the modulo operation
 #endif
+        alignas(CACHE_LINE) static inline thread_local bool check_first;
 
     /**
      * @brief returns the index of the current node [without the MSB]
@@ -68,7 +69,7 @@ private:
      */
     PRQueue(size_t size_par, [[maybe_unused]] const int tid, const uint64_t start): Base(),
 #ifndef DISABLE_POW2
-    sizeRing{detail::nextPowTwo(size_par)},
+    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)},
     mask{sizeRing - 1}
 #else
     sizeRing{size_par}
@@ -84,6 +85,7 @@ private:
 
         Base::head.store(start,std::memory_order_relaxed);
         Base::tail.store(start,std::memory_order_relaxed);
+        check_first = false;
     }
 
 public:
@@ -109,7 +111,7 @@ public:
 
     static std::string className(bool padding = true) {
         using namespace std::string_literals;
-        return (bounded? "Bounded"s : ""s ) + "PRQueue"s + ((padded_cells && padding)? "/padded":"");
+        return "PRQueue"s + ((padded_cells && padding)? "/padded":"");
     }
 
     /***
@@ -124,32 +126,27 @@ public:
      * @warning uses 2CAS operation implemented as asm routines in x86Atomics.hpp
      */
     __attribute__((used,always_inline)) bool push(T* item,[[maybe_unused]] const int tid = 0) {
-    
-        while(true) {
-
-            uint64_t tailTicket = Base::tail.fetch_add(1);
-            
-            if constexpr (bounded == false){
-                if(Base::isClosed(tailTicket)) {
-                    return false;
-                }
+        
+        while (true) {
+            uint64_t tailticket = Base::tail.fetch_add(1,std::memory_order_acquire);
+            if (Base::isClosed(tailticket)) {
+                return false;
             }
 #ifndef DISABLE_POW2
-            Cell& cell = array[tailTicket & mask];
+            Cell& cell = array[tailticket & mask];
 #else
-            Cell& cell = array[tailTicket % size];
+            Cell& cell = array[tailticket % sizeRing];
 #endif
             uint64_t idx = cell.idx.load();
             void* val = cell.val.load();
+            if (val == nullptr
+                && nodeIndex(idx) <= tailticket
+                && (!nodeUnsafe(idx) || Base::head.load() <= tailticket)) {
 
-            if( val == nullptr
-                && nodeIndex(idx) <= tailTicket
-                && (!nodeUnsafe(idx) || Base::head.load() <= tailTicket)) 
-            {
                 void* bottom = threadLocalBottom(tid);
-                if(cell.val.compare_exchange_strong(val,bottom)) {
-                    if(cell.idx.compare_exchange_strong(idx,tailTicket + sizeRing)) {
-                        if(cell.val.compare_exchange_strong(bottom, item)) {
+                if (cell.val.compare_exchange_strong(val, bottom)) {
+                    if (cell.idx.compare_exchange_strong(idx, tailticket + sizeRing)) {
+                        if (cell.val.compare_exchange_strong(bottom, item)) {
                             return true;
                         }
                     } else {
@@ -157,17 +154,10 @@ public:
                     }
                 }
             }
-
-            if(tailTicket >= Base::head.load() + sizeRing){
-                if constexpr (bounded){
+            if (tailticket >= Base::head.load() + sizeRing) {
+                if (Base::closeSegment(tailticket))
                     return false;
-                }
-                else{
-                    if (Base::closeSegment(tailTicket))
-                        return false;
-                }
-            }  
-
+            }
         }
     }
 
@@ -183,58 +173,60 @@ public:
      */
     __attribute__((used,always_inline)) T* pop([[maybe_unused]] const int tid = 0) {
 #ifdef CAUTIOUS_DEQUEUE
-        if(Base::isEmpty())
+        if (Base::isEmpty())
             return nullptr;
 #endif
-        while(true) {
 
-            uint64_t headTicket = Base::head.fetch_add(1);
+        while (true) {
+            uint64_t headticket = Base::head.fetch_add(1,std::memory_order_acquire);
 #ifndef DISABLE_POW2
-            Cell& cell = array[headTicket & mask];
+            Cell& cell = array[headticket & mask];
 #else
-            Cell& cell = array[headTicket % size];
+            Cell& cell = array[headticket % sizeRing];
 #endif
 
             int r = 0;
             uint64_t tt = 0;
 
-            while(1) {
-                uint64_t cell_idx   = cell.idx.load();
-                uint64_t unsafe     = nodeUnsafe(cell_idx);
-                uint64_t idx        = nodeIndex(cell_idx);
+            while (true) {
+                uint64_t cell_idx = cell.idx.load();
+                uint64_t unsafe = nodeUnsafe(cell_idx);
+                uint64_t idx = nodeIndex(cell_idx);
+                void* val = cell.val.load();
 
-                void* val           = cell.val.load();
+                if (idx > headticket + sizeRing)
+                    break;
 
-                if(val != nullptr && !isBottom(val)){
-                    if(idx == headTicket + sizeRing){
+                if (val != nullptr && !isBottom(val)) {
+                    if (idx == headticket + sizeRing) {
                         cell.val.store(nullptr);
                         return static_cast<T*>(val);
                     } else {
-                        if(unsafe) {
-                            if(cell.idx.load() == cell_idx)
+                        if (unsafe) {
+                            if (cell.idx.load() == cell_idx)
                                 break;
                         } else {
-                            if(cell.idx.compare_exchange_strong(cell_idx,setUnsafe(idx)))
+                            if (cell.idx.compare_exchange_strong(cell_idx, setUnsafe(idx)))
                                 break;
                         }
                     }
                 } else {
-                    if((r & ((1ull << 8 ) -1 )) == 0)
+                    if ((r & ((1ull << 8) - 1)) == 0)
                         tt = Base::tail.load();
 
-                    int closed = Base::isClosed(tt);    //in case "bounded" it's always false
+                    int crq_closed = Base::isClosed(tt);
                     uint64_t t = Base::tailIndex(tt);
-                    if(unsafe || t < headTicket + 1  || r > 4 * 1024 || closed) {
-                        if(isBottom(val) && !cell.val.compare_exchange_strong(val,nullptr))
+                    if (unsafe || t < headticket + 1 || crq_closed || r > 4*1024) {
+                        if (isBottom(val) && !cell.val.compare_exchange_strong(val, nullptr))
                             continue;
-                        if(cell.idx.compare_exchange_strong(cell_idx, unsafe | (headTicket + sizeRing)))
+                        if (cell.idx.compare_exchange_strong(cell_idx, unsafe | (headticket + sizeRing)))
                             break;
                     }
                     ++r;
                 }
             }
 
-            if(Base::tailIndex(Base::tail.load()) <= headTicket + 1){
+            if (Base::tailIndex(Base::tail.load()) <= headticket + 1) {
                 Base::fixState();
                 return nullptr;
             }
@@ -248,15 +240,7 @@ public:
      * @note otherwise it uses the QueueSegment underlying implementation
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
-        if constexpr (bounded){
-            int length = Base::tail.load() - Base::head.load();
-            if(length < 0) return 0;
-
-            size_t _length = static_cast<size_t>(length);
-            return _length > sizeRing ? sizeRing : _length;
-        } else {
-            return Base::length();
-        }
+        return Base::length();
     }
 
     /**
@@ -270,20 +254,21 @@ public:
     }
 
 public: 
-    friend class LinkedRingQueue<T,PRQueue<T,padded_cells,bounded>>;   
+    friend class LinkedRingQueue<T,PRQueue<T,padded_cells>>;   
+    friend class BoundedLinkedAdapter<T,PRQueue<T,padded_cells>>;
   
 };
 
 /*
     Declare aliases for Unbounded and Bounded Queues
 */
-template<typename T>
-#ifndef DISABLE_PADDING
-using LPRQueue = LinkedRingQueue<T,PRQueue<T,true,false>>;
-template<typename T>
-using BoundedPRQueue = PRQueue<T,true,true>;
-#else 
-using LPRQueue = LinkedRingQueue<T,PRQueue<T,false,false>>;
 template <typename T>
-using BoundedPRQueue = PRQueue<T,false,true>;
+#ifdef DISABLE_PADDING
+using BoundedPRQueue = BoundedLinkedAdapter<T, PRQueue<T, false>>;
+template <typename T>
+using LPRQueue = LinkedRingQueue<T, PRQueue<T, false>>;
+#else
+using BoundedPRQueue = BoundedLinkedAdapter<T, PRQueue<T, true>>;
+template <typename T>
+using LPRQueue = LinkedRingQueue<T, PRQueue<T, true>>;
 #endif

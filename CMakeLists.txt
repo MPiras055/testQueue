@@ -7,23 +7,55 @@ set(HEADER_DIRS
     ${CMAKE_SOURCE_DIR}/include/utils    
 )
 
-# -------------------  EnqueueDequeue  ------------------- #
-add_executable(EnqueueDequeue
-    ${CMAKE_SOURCE_DIR}/src/benchmark/EnqueueDequeue.cpp
-    ${CMAKE_SOURCE_DIR}/src/utils/AdditionalWork.cpp
+set(Debug_compile_opt "-O0 -g -DDEBUG -fsanitize=address")
+set(Debug_link "-fsanitize=address")
+set(Release_compile_opt "-O3")
+set(Release_link "-fsanitize=address")
+
+# ------------------- Automation -------------------- #
+# Function to create an executable and apply common settings
+function(add_benchmark exec_name)
+    # Get the source files from the function arguments
+    set(SOURCE_FILES ${ARGN})
+
+    # Create the executable
+    add_executable(${exec_name} ${SOURCE_FILES})
+
+    # Apply common compile options, libraries, and include directories
+    target_precompile_headers(${exec_name} PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
+    target_include_directories(${exec_name} PRIVATE ${HEADER_DIRS})
+
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set_target_properties(${exec_name} PROPERTIES COMPILE_FLAGS ${Debug_compile_opt})
+        set_target_properties(${exec_name} PROPERTIES LINK_FLAGS ${Debug_link})
+    else()
+        set_target_properties(${exec_name} PROPERTIES COMPILE_FLAGS ${Release_compile_opt})
+        set_target_properties(${exec_name} PROPERTIES LINK_FLAGS ${Release_link})
+    endif()
+endfunction()
+
+# -------------------  Benchmarks  ------------------- #
+
+add_benchmark(EnqueueDequeue
+    ${CMAKE_SOURCE_DIR}/src/benchmark/EnqueueDequeue.cpp   
 )
 
-target_precompile_headers(EnqueueDequeue PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
-target_include_directories(EnqueueDequeue PRIVATE ${HEADER_DIRS})
+add_benchmark(ProducerConsumer
+    ${CMAKE_SOURCE_DIR}/src/benchmark/ProducerConsumer.cpp 
+)
 
+add_benchmark(oneToMany
+    ${CMAKE_SOURCE_DIR}/src/benchmark/oneToMany.cpp 
+)
 
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set_target_properties(EnqueueDequeue PROPERTIES COMPILE_FLAGS "-O0 -g -DDEBUG -fsanitize=address")
-    set_target_properties(EnqueueDequeue PROPERTIES LINK_FLAGS "-fsanitize=address")
-else()
-    set_target_properties(EnqueueDequeue PROPERTIES COMPILE_FLAGS "-O3")
-    set_target_properties(EnqueueDequeue PROPERTIES LINK_FLAGS "")
-endif()
+add_benchmark(ManyToOne
+    ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToOne.cpp 
+)
+
+add_benchmark(ManyToMany
+    ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToMany.cpp 
+)
+
     
 
 # -------------------  Testing  ------------------- #
@@ -35,11 +67,9 @@ set(HEADER_DIRS
 
 add_executable(ConcurrentTests 
     ${CMAKE_SOURCE_DIR}/src/test/Concurrent.cpp
-    ${CMAKE_SOURCE_DIR}/src/utils/AdditionalWork.cpp
 )
 add_executable(SequentialTests
     ${CMAKE_SOURCE_DIR}/src/test/Sequential.cpp
-    ${CMAKE_SOURCE_DIR}/src/utils/AdditionalWork.cpp
 )
 
 add_subdirectory(include/googletest)

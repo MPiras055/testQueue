@@ -1,16 +1,18 @@
 #pragma once
 #include "HazardPointers.hpp"   //includes <atomic and cassert>
+#include <iostream>
 #include <stdexcept>
 #include <cstddef>              // For alignas
 #include <thread>
 #include "Segment.hpp"
+#include "RQCell.hpp"
 
 #ifndef CACHE_LINE
 #define CACHE_LINE 64
 #endif
 
 template<class T, class Segment>
-class LinkedRingQueue{
+class BoundedLinkedAdapter{
 private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
@@ -20,6 +22,7 @@ private:
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
+    alignas(CACHE_LINE) std::atomic<int> elementCounter; //Counter for number of elements
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -36,17 +39,20 @@ public:
      * 
      * The constructor initializes the head and tail pointers to a new segment
      */
-    LinkedRingQueue(size_t SegmentLength, size_t threads = MAX_THREADS):
-    sizeRing{SegmentLength},
+    BoundedLinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
+    sizeRing{detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
     maxThreads{threads},
     HP(2,maxThreads)    
     {
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
 #endif
-        Segment* sentinel = new Segment(SegmentLength);
+        if(sizeRing > static_cast<size_t>(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("BoundedLinkedAdapter ERROR: sizeRing exceeds the maximum value for an integer");
+        Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
+        elementCounter.store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -54,13 +60,13 @@ public:
      * 
      * Deletes all segments in the queue (also drains the queue)
      */
-    ~LinkedRingQueue() {
+    ~BoundedLinkedAdapter() {
         while(pop(0) != nullptr);
         delete head.load();
     }
 
     static std::string className(bool padding = true){
-        return "Linked" + Segment::className(padding);
+        return "Bounded" + Segment::className(padding);
     }
 
     /**
@@ -71,9 +77,14 @@ public:
      * @note this operation is non-blocking and always succeeds
      * @note if not explicitly set, then uses HazardPointers to ensure no memory leaks due to concurrent allocations and deletions
      */
-    __attribute__((used,always_inline)) void push(T* item, int tid){
+    __attribute__((used,always_inline)) bool push(T* item, int tid){
         if(item == nullptr)
             throw std::invalid_argument(className(false) + "ERROR push(): item cannot be null");
+
+        int currentCounter = elementCounter.load(std::memory_order_acquire);
+        if(currentCounter >= static_cast<int>(sizeRing)){
+            return false;
+        }
         
         Segment *ltail = HP.protect(kHpTail,tail.load(),tid);   //protect the current segment to prevent deallocation
         while(true) {
@@ -96,6 +107,13 @@ public:
             if(ltail->push(item,tid)) { //exit if successful insertion
                 HP.clear(kHpTail,tid);
                 break;
+            } 
+            else {
+                int currentCounter = elementCounter.load(std::memory_order_acquire);
+                if(currentCounter >= static_cast<int>(sizeRing)){
+                    HP.clear(kHpTail,tid);
+                    return false;
+                }
             }
 
             //if failed insertion then current segment is full (allocate a new one)
@@ -113,6 +131,9 @@ public:
 
             ltail = HP.protect(kHpTail,nullSegment,tid);    //update protection on the current new segment
         }
+
+        elementCounter.fetch_add(1,std::memory_order_release);
+        return true;
     }
 
     /**
@@ -152,6 +173,9 @@ public:
             }
 
             HP.clear(kHpHead,tid); //after pop removes protection on the current segment
+            if(item != nullptr) {
+                elementCounter.fetch_sub(1,std::memory_order_release);
+            }
             return item;
         }
     }
@@ -167,12 +191,7 @@ public:
      * 
      */
     size_t length(int tid) {
-        Segment *lhead = HP.protect(kHpHead,head,tid);
-        Segment *ltail = HP.protect(kHpTail,tail,tid);
-        uint64_t t = ltail->getTailIndex();
-        uint64_t h = lhead->getHeadIndex();
-        HP.clear(tid);
-        return t > h ? t - h : 0;
+        return 0;
     }
 
     /**

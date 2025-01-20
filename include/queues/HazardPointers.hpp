@@ -148,12 +148,16 @@ public:
      * Else it adds the pointer to the retired list.
      * 
      * @note If the number of retired pointers is greater than `THRESHOLD_R`, the function checks if the pointer can be deleted
+     * 
+     * @note the function return value can be ignored, it's just a hack for Bounded queue because we can use an atomic counter to 
+     * keep track of the current segment allocation.
      */
-    void retire(T* ptr, const int tid) 
+    uint64_t retire(T* ptr, const int tid) 
     {
+        uint64_t deleted = 0;
         Retired[tid*CLPAD].push_back(ptr);
         if(Retired[tid*CLPAD].size() < THRESHOLD_R)
-            return;
+            return 0;
         for(unsigned iRet = 0; iRet < Retired[tid * CLPAD].size();){
             auto obj = Retired[tid*CLPAD][iRet];
 
@@ -169,10 +173,12 @@ public:
             if(canDelete){
                 Retired[tid*CLPAD].erase(Retired[tid*CLPAD].begin() + iRet);
                 delete obj;
+                deleted++;
                 continue;
             }
             iRet++;
-        }    
+        }
+        return deleted;
     }
 };
 
@@ -190,7 +196,7 @@ public:
     T* protect(const int, std::atomic<T*>& atom,const int){return atom.load();}
     T* protect(const int, T* ptr, const int){return ptr;}
     T* protectRelease(const int, T* ptr, const int){return ptr;}
-    void retire(T*, const int){};
+    uint64_t retire(T*, const int){return 0}; //updated the stub to always return 0
 };
 
 #endif //_HAZARD_POINTERS_H_

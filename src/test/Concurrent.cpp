@@ -1,11 +1,8 @@
 #include "gtest/gtest.h"
 #include <algorithm>
-#include <atomic>
-#include <iostream>
 #include <barrier>
 #include <vector>
 #include <numeric>
-#include <random>
 
 #include "QueueTypeSet.hpp"
 #include "ThreadGroup.hpp"
@@ -52,7 +49,7 @@ public:
     static constexpr int THREADS = 128;
     const size_t RUNS = 5;
     const size_t THREADS_RUN = 2;
-    const size_t ITER_ITEMS = 10'000;
+    const size_t ITER_ITEMS = 1'000'000;
 
     Q queue;
 
@@ -67,7 +64,7 @@ public:
     static constexpr size_t SIZE = 1024;
     const size_t RUNS = 5;
     const size_t THREADS_RUN     = 4;
-    const size_t ITER_ITEMS      = 10'000;
+    const size_t ITER_ITEMS      = 10000'000;
 
     Q queue;
 
@@ -122,7 +119,7 @@ TYPED_TEST(Unbounded,TransferAllItems){
                 if(item == nullptr) break;
                 sum += item->value;
             }
-            threadBarrier->arrive_and_wait();    //so producer can safely dealloc dynamic memory
+            threadBarrier->arrive_and_wait();  //so producer can safely dealloc dynamic memory
             return sum;
         };
 
@@ -185,9 +182,7 @@ TYPED_TEST(Bounded,TransferAllItems){
         threadBarrier->arrive_and_wait();
         for(int i = 0; i< ItemsPerThread; i++){
             items[i] = Data(tid,i+1);
-            while(!this->queue.push(&(items[i]),tid)){
-                std::this_thread::yield();
-            }
+            while(!this->queue.push(&(items[i]),tid)){}
             
         }
         prodBarrier->arrive_and_wait();
@@ -385,9 +380,7 @@ TYPED_TEST(Bounded, QueueSemantics) {
     const auto prod_lambda = [this,&ItemsToInsert ,&prodBarrier, &threadBarrier](const int vectorIdx,const int tid) {
         threadBarrier->arrive_and_wait();
         for (Data& item : ItemsToInsert[vectorIdx]) {
-            while(this->queue.push(&item, tid) == false){
-                std::this_thread::yield();   
-            };
+            while(this->queue.push(&item, tid) == false){};
         }
         prodBarrier->arrive_and_wait();
     };

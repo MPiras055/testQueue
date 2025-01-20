@@ -4,15 +4,16 @@
 #include <cassert>
 
 #include "LinkedRingQueue.hpp"
+#include "BoundedElementCounter.hpp"
 #include "RQCell.hpp"
 #include "x86Atomics.hpp"
 
 
-template <typename T, bool padded_cells, bool bounded>
-class CRQueue : public QueueSegmentBase<T, CRQueue<T, padded_cells, bounded>> {
+template <typename T, bool padded_cells>
+class CRQueue : public QueueSegmentBase<T, CRQueue<T, padded_cells>> {
 private:
 
-    using Base = QueueSegmentBase<T, CRQueue<T, padded_cells, bounded>>;
+    using Base = QueueSegmentBase<T, CRQueue<T, padded_cells>>;
     using Cell = detail::CRQCell<T *, padded_cells>;
 
     size_t sizeRing;
@@ -52,7 +53,7 @@ private:
      */
     CRQueue(size_t size_par,[[maybe_unused]] const int tid, const uint64_t start): Base(), 
 #ifndef DISABLE_POW2
-    sizeRing{detail::nextPowTwo(size_par)},
+    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)},
     mask{sizeRing - 1}
 #else
     sizeRing{size_par}
@@ -96,7 +97,7 @@ public:
 
     static std::string className(bool padding = true){
         using namespace std::string_literals;
-        return (bounded? "Bounded"s : ""s) + "CRQueue"s + ((padded_cells && padding)? "/padded":"");
+        return "CRQueue"s + ((padded_cells && padding)? "/padded":"");
     }
 
     /**
@@ -117,13 +118,13 @@ public:
     {
         while (true)
         {
-            uint64_t tailTicket = Base::tail.fetch_add(1);
+            uint64_t tailTicket = Base::tail.fetch_add(1,std::memory_order_acquire);
 
-            if constexpr (bounded == false){
-                if(Base::isClosed(tailTicket)){
-                    return false;
-                }
+            
+            if(Base::isClosed(tailTicket)){
+                return false;
             }
+            
 #ifndef DISABLE_POW2
             Cell &cell = array[tailTicket & mask];
 #else
@@ -142,16 +143,10 @@ public:
                 }
             }
 
-            if (tailTicket >= Base::head.load() + sizeRing)
-            {   
-                if constexpr (bounded){ //if queue is bounded then never closes the segment
-                    return false;
-                }
-                else{
-                    if (Base::closeSegment(tailTicket)){
-                        return false;
-                    }
-                }
+            if(tailTicket >= Base::head.load() + sizeRing)
+            {
+                Base::closeSegment(tailTicket);
+                return false;
             }
         }
     }
@@ -173,7 +168,7 @@ public:
 #endif
         while (true)
         {
-            uint64_t headTicket = Base::head.fetch_add(1);
+            uint64_t headTicket = Base::head.fetch_add(1,std::memory_order_acquire);
 #ifndef DISABLE_POW2
             Cell &cell = array[headTicket & mask];
 #else
@@ -237,14 +232,7 @@ public:
      * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
-        if constexpr (bounded){
-            int length = Base::tail.load() - Base::head.load();
-            if(length < 0) return 0;
-            size_t _length = static_cast<size_t>(length);
-            return _length > sizeRing ? sizeRing : _length;
-        } else {
-            return Base::length();
-        }
+        return Base::length();
     }
 
     /**
@@ -257,19 +245,20 @@ public:
         return sizeRing;
     }
 
-    friend class LinkedRingQueue<T,CRQueue<T,padded_cells,bounded>>;   //LinkedRingQueue can access private class members 
+    friend class LinkedRingQueue<T,CRQueue<T,padded_cells>>;   //LinkedRingQueue can access private class members 
+    friend class BoundedLinkedAdapter<T,CRQueue<T,padded_cells>>; //BoundedLinkedAdapter can access private class members
 };
 
 /**
  * Alias for easy instantiation
  */
-template<typename T>
-#ifndef DISABLE_PADDING
-using LCRQueue = LinkedRingQueue<T,CRQueue<T,true,false>>;
-template<typename T>
-using BoundedCRQueue = CRQueue<T,true,true>;
-#else 
-using LCRQueue = LinkedRingQueue<T,CRQueue<T,false,false>>;
 template <typename T>
-using BoundedCRQueue = CRQueue<T,false,true>;
+#ifdef DISABLE_PADDING
+using BoundedCRQueue = BoundedLinkedAdapter<T, CRQueue<T, false>>;
+template <typename T>
+using LCRQueue = LinkedRingQueue<T, CRQueue<T, false>>;
+#else
+using BoundedCRQueue = BoundedLinkedAdapter<T, CRQueue<T, true>>;
+template <typename T>
+using LCRQueue = LinkedRingQueue<T, CRQueue<T, true>>;
 #endif
