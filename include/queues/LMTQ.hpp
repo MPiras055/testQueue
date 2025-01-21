@@ -8,7 +8,7 @@
 
 
 #define BACKOFF_MIN 128UL
-#define BACKOFF_MAX 1024UL
+#define BACKOFF_MAX 1023UL
 
 template <typename T,bool padded_cells, bool bounded>
 class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
