@@ -225,7 +225,6 @@ TYPED_TEST(Bounded,TransferAllItems){
                     threads.threadWithResult(cons_lambda,sum[jCons]);
 
                 //Start threads
-                //std::cout << "Starting threads: " << producers << " producers " << consumers << " consumers" << ItemsPerThread << std::endl;
                 threadBarrier->arrive_and_wait();
                 prodBarrier->arrive_and_wait();
                 stopFlag.store(true);

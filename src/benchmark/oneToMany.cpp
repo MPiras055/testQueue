@@ -34,7 +34,6 @@ void producerRoutine(Q<Data> *queue, threadArgs *args, const int tid){
 #endif
     (args->consumerBarrier)->arrive_and_wait(); //this is all_threads Barrier
     for(size_t i = 0; i < iter; i++){
-        puts("IN HERE");
 #ifdef DEBUG
         //Reference necessary to prevent out of scope access
         Data &item = items[i];
@@ -112,7 +111,6 @@ void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const 
 template< template <typename> typename Q>
 long double benchmark(size_t consumers,size_t size_queue,size_t items,size_t min_wait,size_t max_wait){
     Q<Data> queue(size_queue, consumers + 1);
-    puts("ENTERED");
     std::barrier<> threadBarrier(consumers + 2); //consumers + 1 producer + 1 main thread
     std::barrier<> producerBarrier(2);
     std::atomic<bool> stopFlag{false}; //flag to signal consumers that producer is done
@@ -130,7 +128,6 @@ long double benchmark(size_t consumers,size_t size_queue,size_t items,size_t min
     arg.numOps = items;
 
     //schedule producer
-    puts("SCHEDULING THREADS");
     threads.emplace_back(producerRoutine<Q>,&queue,&arg,0);
     for(int tid = 1 ; tid < consumers + 1; tid++){
         threads.emplace_back(consumerRoutine<Q>,&queue,&arg,&(consumerData[tid-1]),tid);
@@ -166,8 +163,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    puts("HELLO WORLD");
-
     //refers to the class name of the queue [discarding the /padding suffix if present]
     std::string name = argv[1];
     size_t consumers = std::stoul(argv[2]);
@@ -192,13 +187,10 @@ int main(int argc, char **argv) {
         }
     });
 
-    puts("EXECUTED BENCHMARK");
-
     if (!found) {
         std::cout << "Queue not found: " << name << std::endl;
         return 1;
     }
-    std::cout << "Hello world" << std::endl;
     std::cout << result << std::endl;
     return 0;
 }

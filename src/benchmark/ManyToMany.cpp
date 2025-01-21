@@ -118,7 +118,6 @@ void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const 
  */
 template< template <typename> typename Q>
 long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t items,size_t min_wait,size_t max_wait){
-    std::cout << "Producers: " << producers << " Consumers: " << consumers + 1 << "\n";
     Q<Data> queue(size_queue, producers + consumers + 1);
     std::barrier<> threadBarrier(producers + consumers + 1); //(producers + 1 producer + 1 main thread)
     std::barrier<> producerBarrier(producers + 1);
