@@ -233,6 +233,14 @@ TYPED_TEST(Bounded,TransferAllItems){
                 threads.join();
 
                 //Check if all items have been dequeued
+                /***
+                 * @warning debug needs to be fixed
+                    Fix it to account for the fact that I can't store the result in a single variable
+                 * 
+                 * So instead, store ItemsPerThread*(ItemsPerThread+1)/2 and iterate through the vector to
+                 * compute the difference
+                 */
+
                 uint64_t total = std::accumulate(sum.begin(),sum.end(),0);
                 total /= producers;
                 ASSERT_EQ(total,ItemsPerThread*(ItemsPerThread+1)/2)   << "Failed at run " << iRun 
