@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <vector>
+#include <iostream>
 
 #ifndef DISABLE_HAZARD
 
@@ -50,8 +51,8 @@ public:
     {
         assert(maxHPs <= MAX_HP_PER_THREAD);
         assert(maxThreads <= MAX_THREADS);
-        for(int iThread = 0; iThread < maxThreads; iThread++){
-            for(int iHP = 0; iHP < maxHPs; iHP++){
+        for(int iThread = 0; iThread < MAX_THREADS; iThread++){
+            for(int iHP = 0; iHP < MAX_HP_PER_THREAD; iHP++){
                 Hazard[iThread*CLPAD][iHP].store(nullptr,std::memory_order_relaxed);
             }
         }
@@ -152,16 +153,21 @@ public:
      * @note the function return value can be ignored, it's just a hack for Bounded queue because we can use an atomic counter to 
      * keep track of the current segment allocation.
      */
-    uint64_t retire(T* ptr, const int tid) 
+    uint64_t retire(T* ptr, const int tid,bool check_thresh = true) 
     {
-        uint64_t deleted = 0;
         Retired[tid*CLPAD].push_back(ptr);
-        if(Retired[tid*CLPAD].size() < THRESHOLD_R)
+        if(check_thresh && Retired[tid*CLPAD].size() < THRESHOLD_R){
             return 0;
+        }
+        uint64_t deleted = 0;
         for(unsigned iRet = 0; iRet < Retired[tid * CLPAD].size();){
             auto obj = Retired[tid*CLPAD][iRet];
 
             bool canDelete = true;
+
+            /**
+             * check matrix to see if the object is still in use
+             */
             for(int tid = 0; tid < maxThreads && canDelete; tid++){
                 for(int iHP = maxHPs -1; iHP >= 0; iHP--){
                     if(Hazard[tid*CLPAD][iHP].load() == obj){
@@ -180,6 +186,7 @@ public:
         }
         return deleted;
     }
+
 };
 
 
@@ -191,12 +198,12 @@ public:
     HazardPointers( [[maybe_unused]] int maxHPs=0,
                     [[maybe_unused]] int maxThreads = 0) {}
 
-    void clear(const int){}
-    void clear(const int, const int){}
-    T* protect(const int, std::atomic<T*>& atom,const int){return atom.load();}
-    T* protect(const int, T* ptr, const int){return ptr;}
-    T* protectRelease(const int, T* ptr, const int){return ptr;}
-    uint64_t retire(T*, const int){return 0}; //updated the stub to always return 0
+    void clear(const int tid){}
+    void clear(const int iHp, const int tid){}
+    T* protect(const int iHp, std::atomic<T*>& atom,const int tid){return atom.load();}
+    T* protect(const int iHp, T* ptr, const int tid){return ptr;}
+    T* protectRelease(const int iHp, T* ptr, const int tid){return ptr;}
+    uint64_t retire(T*, const int tid, bool check_thresh = true){return 0}; //updated the stub to always return 0
 };
 
 #endif //_HAZARD_POINTERS_H_

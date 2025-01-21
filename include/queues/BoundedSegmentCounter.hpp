@@ -16,12 +16,14 @@ private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
     static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
+    static constexpr size_t MAX_SEGMENTS = 4;   //if this is too big then prformace drops due to pointer undirection
     const size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
-    alignas(CACHE_LINE) std::atomic<int> elementCounter; //Counter for number of elements
+    alignas(CACHE_LINE) std::atomic<uint64_t> tailIndex; //the difference tells us if we can keep allocating new segments
+    alignas(CACHE_LINE) std::atomic<uint64_t> headIndex;
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -39,7 +41,8 @@ public:
      * The constructor initializes the head and tail pointers to a new segment
      */
     BoundedLinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
-    sizeRing{detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
+    //we initialize size to be Seggments / 4 so that max allocated segments account for total queeu length
+    sizeRing{(detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength))/MAX_SEGMENTS},
     maxThreads{threads},
     HP(2,maxThreads)    
     {
@@ -51,7 +54,8 @@ public:
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
-        elementCounter.store(0, std::memory_order_relaxed);
+        headIndex.store(0, std::memory_order_relaxed);
+        tailIndex.store(0, std::memory_order_relaxed);
     }
 
     /**
@@ -79,11 +83,6 @@ public:
     __attribute__((used,always_inline)) bool push(T* item, int tid){
         if(item == nullptr)
             throw std::invalid_argument(className(false) + "ERROR push(): item cannot be null");
-
-        int currentCounter = elementCounter.load(std::memory_order_acquire);
-        if(currentCounter >= static_cast<int>(sizeRing)){
-            return false;
-        }
         
         Segment *ltail = HP.protect(kHpTail,tail.load(),tid);   //protect the current segment to prevent deallocation
         while(true) {
@@ -108,11 +107,12 @@ public:
                 break;
             } 
             else {
-                int currentCounter = elementCounter.load(std::memory_order_acquire);
-                if(currentCounter >= static_cast<int>(sizeRing)){
+                uint64_t tailIdx = tailIndex.load(std::memory_order_acquire);
+                uint64_t headIdx = headIndex.load(std::memory_order_acquire);
+                if(tailIdx - headIdx >= MAX_SEGMENTS) { //can't allocate more segments
                     HP.clear(kHpTail,tid);
                     return false;
-                }
+                } else tailIndex.fetch_add(1,std::memory_order_release); //account for new allocated segemnt
             }
 
             //if failed insertion then current segment is full (allocate a new one)
@@ -125,13 +125,14 @@ public:
                 HP.clear(kHpTail,tid); //clear protection on the tail before exiting
                 break;
             } 
-            else 
+            else {
                 delete newTail; //delete the segment since the modification has been unsuccesful
-
+                tailIndex.fetch_sub(1,std::memory_order_release); //account for the failed allocation
+            }
             ltail = HP.protect(kHpTail,nullSegment,tid);    //update protection on the current new segment
         }
 
-        elementCounter.fetch_add(1,std::memory_order_release);
+        //elementCounter.fetch_add(1,std::memory_order_release);
         return true;
     }
 
@@ -161,8 +162,10 @@ public:
                     item = lhead->pop(tid); //DequeueAfterNextLinked(lnext)
                     if (item == nullptr) {
                         if (head.compare_exchange_strong(lhead, lnext)) {   //changes shared head pointer
-                            HP.retire(lhead, tid); //tries to deallocate current segment
+                            uint64_t deleted = HP.retire(lhead, tid); //tries to deallocate current segment
                             lhead = HP.protect(kHpHead, lnext, tid); //protect new segment
+                            //update headIndex
+                            headIndex.fetch_add(1,std::memory_order_release);  
                         } else {
                             lhead = HP.protect(kHpHead, lhead, tid);
                         }
@@ -172,9 +175,6 @@ public:
             }
 
             HP.clear(kHpHead,tid); //after pop removes protection on the current segment
-            if(item != nullptr) {
-                elementCounter.fetch_sub(1,std::memory_order_release);
-            }
             return item;
         }
     }

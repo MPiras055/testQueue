@@ -1,8 +1,9 @@
 #pragma once
 #include "HazardPointers.hpp"   //includes <atomic and cassert>
-#include <iostream>
 #include <stdexcept>
 #include <cstddef>              // For alignas
+#include <thread>
+#include <iostream>
 #include "Segment.hpp"
 #include "RQCell.hpp"
 
@@ -14,14 +15,14 @@ template<class T, class Segment>
 class BoundedLinkedAdapter{
 private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
-    static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
-    static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
+    static constexpr int kHpTail = 0;
+    static constexpr int kHpHead = 1; 
     const size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
-    alignas(CACHE_LINE) std::atomic<int> elementCounter; //Counter for number of elements
+    alignas(CACHE_LINE) std::atomic<int> segmentCounter; //ho bisogno di un intero segnato
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -35,23 +36,23 @@ public:
      * @brief Constructor for the Linked Ring Queue
      * @param SegmentLength (size_t) sizeRing of the segments
      * @param threads (size_t) number of threads [default: MAX_THREADS]
+     * @param extraSegment (bool) if true then the queue can allocate an extra segment
      * 
      * The constructor initializes the head and tail pointers to a new segment
      */
     BoundedLinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
-    sizeRing{detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
+    sizeRing{(detail::nextPowTwo(SegmentLength)) >> 2},   //we set the sizeRing to 1/4 of the segment size
     maxThreads{threads},
     HP(2,maxThreads)    
     {
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
 #endif
-        if(sizeRing > static_cast<size_t>(std::numeric_limits<int>::max()))
-            throw std::invalid_argument("BoundedLinkedAdapter ERROR: sizeRing exceeds the maximum value for an integer");
+
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
-        elementCounter.store(0, std::memory_order_relaxed);
+        segmentCounter.store(3, std::memory_order_relaxed); //Can allocate up to 3 other segments to count for the first segment;
     }
 
     /**
@@ -79,59 +80,69 @@ public:
     __attribute__((used,always_inline)) bool push(T* item, int tid){
         if(item == nullptr)
             throw std::invalid_argument(className(false) + "ERROR push(): item cannot be null");
+        // uint64_t element = elementCounter.load(std::memory_order_acquire);
+        // if(element >= sizeRing){
+        //     return false;
+        // }
 
-        int currentCounter = elementCounter.load(std::memory_order_acquire);
-        if(currentCounter >= static_cast<int>(sizeRing)){
-            return false;
-        }
-        
-        Segment *ltail = HP.protect(kHpTail,tail.load(),tid);   //protect the current segment to prevent deallocation
+        Segment *ltail = HP.protect(kHpTail,tail.load(),tid);
         while(true) {
 #ifndef DISABLE_HAZARD
-            Segment *ltail2 = tail.load();  //check if the tail has been updated
+            Segment *ltail2 = tail.load();
             if(ltail2 != ltail){
                 ltail = HP.protect(kHpTail,ltail2,tid); //if current segment has been updated then changes
                 continue;
             }
 #endif  
+
             Segment *lnext = ltail->next.load();
             if(lnext != nullptr) { //If a new segment exists
                 tail.compare_exchange_strong(ltail, lnext)?
-                    ltail = HP.protect(kHpTail, lnext,tid) //update protection on the new segment
+                    ltail = HP.protect(kHpTail, lnext,tid) //update protection on the new Segment
                 : 
-                    ltail = HP.protect(kHpTail,tail.load(),tid); //someone else already updated the shared queue so update protection
+                    ltail = HP.protect(kHpTail,tail.load(),tid); //someone else already updated the shared queue
                 continue; //try push on the new segment
             }
 
-            if(ltail->push(item,tid)) { //exit if successful insertion
-                HP.clear(kHpTail,tid);
+            if(ltail->push(item,tid)) {
+                HP.clear(kHpTail,tid); //if succesful insertion then exits updating the HP matrix
                 break;
-            } 
-            else {
-                int currentCounter = elementCounter.load(std::memory_order_acquire);
-                if(currentCounter >= static_cast<int>(sizeRing)){
+            } else {
+                /**
+                 * I think there's a problem in this new segmentCounter increment, still not sure
+                 * why it breaks the semantics, also why some elements get lost
+                 * 
+                 * @note try to allocate a new segment
+                 */
+                int currentSegmentCounter = segmentCounter.load();
+                if(currentSegmentCounter > 0){
+                    if(!segmentCounter.compare_exchange_strong(currentSegmentCounter, currentSegmentCounter + 1)){
+                        continue;   //dont need to clear since it gets cleaned in the next cycle
+                    }
+                } else {
                     HP.clear(kHpTail,tid);
                     return false;
                 }
             }
+            
 
             //if failed insertion then current segment is full (allocate a new one)
             Segment* newTail = new Segment(sizeRing,0,ltail->getTailIndex());
-            newTail->push(item,tid);    //push in the segment (always successful since there's no other thread)
+            newTail->push(item,tid);    //should always be successful
 
             Segment* nullSegment = nullptr;
             if(ltail->next.compare_exchange_strong(nullSegment,newTail)){ //if CAS succesful then the queue has ben updated
                 tail.compare_exchange_strong(ltail,newTail);
-                HP.clear(kHpTail,tid); //clear protection on the tail before exiting
+                HP.clear(kHpTail,tid); //clear protection on the tail
                 break;
             } 
-            else 
+            else{
+                segmentCounter.fetch_add(1); //update the counter for next available segment
                 delete newTail; //delete the segment since the modification has been unsuccesful
-
-            ltail = HP.protect(kHpTail,nullSegment,tid);    //update protection on the current new segment
+            }
+            ltail = HP.protect(kHpTail,nullSegment,tid);    //update protection on hte current new segment
         }
 
-        elementCounter.fetch_add(1,std::memory_order_release);
         return true;
     }
 
@@ -161,7 +172,13 @@ public:
                     item = lhead->pop(tid); //DequeueAfterNextLinked(lnext)
                     if (item == nullptr) {
                         if (head.compare_exchange_strong(lhead, lnext)) {   //changes shared head pointer
-                            HP.retire(lhead, tid); //tries to deallocate current segment
+                            /**
+                             * Only one thread per pointer so no need to synchronize
+                             * 
+                             * We increment the segmentCounter by the number of successfully deleted segments
+                             * @note might be 0
+                             */
+                            int currentCounter = segmentCounter.fetch_add(HP.retire(lhead, tid));
                             lhead = HP.protect(kHpHead, lnext, tid); //protect new segment
                         } else {
                             lhead = HP.protect(kHpHead, lhead, tid);
@@ -170,11 +187,9 @@ public:
                     }
                 }
             }
-
+            // if(item != nullptr)  //Dont need element counter anymore
+            //     elementCounter.fetch_sub(1);
             HP.clear(kHpHead,tid); //after pop removes protection on the current segment
-            if(item != nullptr) {
-                elementCounter.fetch_sub(1,std::memory_order_release);
-            }
             return item;
         }
     }
@@ -190,6 +205,12 @@ public:
      * 
      */
     size_t length(int tid) {
+        // Segment *lhead = HP.protect(kHpHead,head,tid);
+        // Segment *ltail = HP.protect(kHpTail,tail,tid);
+        // uint64_t t = ltail->getTailIndex();
+        // uint64_t h = lhead->getHeadIndex();
+        // HP.clear(tid);
+        // return t > h ? t - h : 0;
         return 0;
     }
 
@@ -201,7 +222,7 @@ public:
      * @warning if the queue uses segments of different sizes then the value returned could be incorrect
      */
     inline size_t capacity() const {
-        return sizeRing;
+        return sizeRing << 2;
     }
 
 };
