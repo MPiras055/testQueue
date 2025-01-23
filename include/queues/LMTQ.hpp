@@ -105,7 +105,7 @@ public:
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             if(tailTicket == idx){
-                if(Base::tail.compare_exchange_strong(tailTicket,tailTicket + 1)) //try to advance the index
+                if(Base::tail.compare_exchange_weak(tailTicket,tailTicket + 1,std::memory_order_relaxed)) //try to advance the index
                     break;
                 loop(bk);   //loop function that shoudnt be optimized out
                 bk <<= 1;
@@ -156,11 +156,11 @@ public:
             idx = node->idx.load(std::memory_order_acquire);
             long diff = idx - (headTicket + 1);
             if(diff == 0){
-                if(Base::head.compare_exchange_strong(headTicket,headTicket + 1)) //try to advance the head
+                if(Base::head.compare_exchange_weak(headTicket,headTicket + 1,std::memory_order_relaxed)) //try to advance the head
                     break;
                 loop (bk);  //loop function that shoudnt be optimized out
                 bk <<= 1;
-                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;;
+                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;
             }
             else if (diff < 0){ //check if queue is empty
                 if(Base::isEmpty())
