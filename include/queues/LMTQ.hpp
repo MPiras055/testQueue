@@ -7,8 +7,8 @@
 #include "AdditionalWork.hpp"   //for loop function
 
 
-#define BACKOFF_MIN 128UL
-#define BACKOFF_MAX 1023UL
+#define BACKOFF_MIN 128UL //should be a power of 2
+#define BACKOFF_MAX 1024UL //should be a power of 2
 
 template <typename T,bool padded_cells, bool bounded>
 class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
@@ -109,7 +109,7 @@ public:
                     break;
                 loop(bk);   //loop function that shoudnt be optimized out
                 bk <<= 1;
-                bk &= BACKOFF_MAX;
+                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;
             } else {
                 if(tailTicket > idx){
                     if constexpr (bounded){ //if queue is bounded then never closes the segment
@@ -160,7 +160,7 @@ public:
                     break;
                 loop (bk);  //loop function that shoudnt be optimized out
                 bk <<= 1;
-                bk &= BACKOFF_MAX;
+                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;;
             }
             else if (diff < 0){ //check if queue is empty
                 if(Base::isEmpty())
