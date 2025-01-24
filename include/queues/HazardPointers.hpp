@@ -153,13 +153,12 @@ public:
      * @note the function return value can be ignored, it's just a hack for Bounded queue because we can use an atomic counter to 
      * keep track of the current segment allocation.
      */
-    uint64_t retire(T* ptr, const int tid,bool check_thresh = true) 
+    void retire(T* ptr, const int tid,bool check_thresh = false) 
     {
-        Retired[tid*CLPAD].push_back(ptr);
+        if(ptr != nullptr) Retired[tid*CLPAD].push_back(ptr);
         if(check_thresh && Retired[tid*CLPAD].size() < THRESHOLD_R){
-            return 0;
+            return;
         }
-        uint64_t deleted = 0;
         for(unsigned iRet = 0; iRet < Retired[tid * CLPAD].size();){
             auto obj = Retired[tid*CLPAD][iRet];
 
@@ -179,12 +178,11 @@ public:
             if(canDelete){
                 Retired[tid*CLPAD].erase(Retired[tid*CLPAD].begin() + iRet);
                 delete obj;
-                deleted++;
                 continue;
             }
             iRet++;
         }
-        return deleted;
+        return;
     }
 
 };
@@ -203,7 +201,7 @@ public:
     T* protect(const int iHp, std::atomic<T*>& atom,const int tid){return atom.load();}
     T* protect(const int iHp, T* ptr, const int tid){return ptr;}
     T* protectRelease(const int iHp, T* ptr, const int tid){return ptr;}
-    uint64_t retire(T*, const int tid, bool check_thresh = true){return 0}; //updated the stub to always return 0
+    void retire(T*, const int tid, bool check_thresh = true){}; //updated the stub to always return 0
 };
 
 #endif //_HAZARD_POINTERS_H_

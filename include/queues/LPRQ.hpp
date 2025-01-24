@@ -2,7 +2,7 @@
 #include <iostream>
 #include <atomic>
 #include "LinkedRingQueue.hpp"
-#include "BoundedElementCounter.hpp"
+#include "BoundedSegmentCounter.hpp"
 #include "RQCell.hpp"
 #include <iostream>
 

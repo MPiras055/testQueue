@@ -86,6 +86,14 @@ public:
     }
 
     /**
+     * @brief set the closed bit of a segment from outsinde
+     * @note calls bool closeSegment(const uint64_t)
+     */
+    inline bool closeSegment() {
+        return closeSegment(tail.load()-1); //minus one to not accout for the fetch-add operation
+    }
+
+    /**
      * @brief checks if the current semgnet is empty is empty
      */
     inline bool isEmpty() const {

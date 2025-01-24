@@ -4,7 +4,7 @@
 #include <cassert>
 
 #include "LinkedRingQueue.hpp"
-#include "BoundedElementCounter.hpp"
+#include "BoundedSegmentCounter.hpp"
 #include "RQCell.hpp"
 #include "x86Atomics.hpp"
 

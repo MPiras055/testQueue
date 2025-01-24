@@ -5,6 +5,10 @@
 #include <cstddef>              // For alignas
 #include "Segment.hpp"
 #include "RQCell.hpp"
+#include "AdditionalWork.hpp"
+
+#define __backoff_segment_min 128UL //should be a power of 2
+#define __backoff_segment_max 1024UL //should be a power of 2
 
 #ifndef CACHE_LINE
 #define CACHE_LINE 64
@@ -16,7 +20,7 @@ private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
     static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
-    static constexpr size_t MAX_SEGMENTS = 4;   //if this is too big then prformace drops due to pointer undirection
+    const size_t MAX_SEGMENTS = 4;   //if this is too big then prformace drops due to pointer undirection
     const size_t sizeRing;
     const size_t maxThreads;
 
@@ -24,6 +28,7 @@ private:
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
     alignas(CACHE_LINE) std::atomic<uint64_t> tailIndex; //the difference tells us if we can keep allocating new segments
     alignas(CACHE_LINE) std::atomic<uint64_t> headIndex;
+    alignas(CACHE_LINE) static inline thread_local uint64_t backoff = __backoff_segment_min;
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -40,9 +45,10 @@ public:
      * 
      * The constructor initializes the head and tail pointers to a new segment
      */
-    BoundedLinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
+    BoundedLinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS, size_t segmentSize = 4):
     //we initialize size to be Seggments / 4 so that max allocated segments account for total queeu length
-    sizeRing{(detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength))/MAX_SEGMENTS},
+    MAX_SEGMENTS{segmentSize},
+    sizeRing{(detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength))/segmentSize},
     maxThreads{threads},
     HP(2,maxThreads)    
     {
@@ -54,6 +60,7 @@ public:
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
+
         headIndex.store(0, std::memory_order_relaxed);
         tailIndex.store(0, std::memory_order_relaxed);
     }
@@ -81,6 +88,7 @@ public:
      * @note if not explicitly set, then uses HazardPointers to ensure no memory leaks due to concurrent allocations and deletions
      */
     __attribute__((used,always_inline)) bool push(T* item, int tid){
+
         if(item == nullptr)
             throw std::invalid_argument(className(false) + "ERROR push(): item cannot be null");
         
@@ -109,10 +117,13 @@ public:
             else {
                 uint64_t tailIdx = tailIndex.load(std::memory_order_acquire);
                 uint64_t headIdx = headIndex.load(std::memory_order_acquire);
-                if(tailIdx - headIdx >= MAX_SEGMENTS) { //can't allocate more segments
+                if(tailIdx - headIdx >= MAX_SEGMENTS-1) { //can't allocate more segments
+                    loop(backoff); //spin for a while
+                    backoff << 1;
+                    backoff = ((backoff-1) & (__backoff_segment_max-1)) + 1;  //clamp backoff to backoff max
                     HP.clear(kHpTail,tid);
                     return false;
-                } else tailIndex.fetch_add(1,std::memory_order_release); //account for new allocated segemnt
+                }
             }
 
             //if failed insertion then current segment is full (allocate a new one)
@@ -120,19 +131,20 @@ public:
             newTail->push(item,tid);    //push in the segment (always successful since there's no other thread)
 
             Segment* nullSegment = nullptr;
-            if(ltail->next.compare_exchange_strong(nullSegment,newTail)){ //if CAS succesful then the queue has ben updated
+            if(ltail->next.compare_exchange_strong(nullSegment,newTail)){ //if CAS succesful then shared index has been updated
+                HP.protect(kHpTail,newTail,tid); //update protection on the new segment
                 tail.compare_exchange_strong(ltail,newTail);
+                tailIndex.fetch_add(1,std::memory_order_release); //increment the tailIndex [transitioning to new segment]
+
                 HP.clear(kHpTail,tid); //clear protection on the tail before exiting
                 break;
             } 
             else {
                 delete newTail; //delete the segment since the modification has been unsuccesful
-                tailIndex.fetch_sub(1,std::memory_order_release); //account for the failed allocation
             }
             ltail = HP.protect(kHpTail,nullSegment,tid);    //update protection on the current new segment
         }
-
-        //elementCounter.fetch_add(1,std::memory_order_release);
+        backoff = __backoff_segment_min;  //reset backoff
         return true;
     }
 
@@ -149,8 +161,10 @@ public:
         Segment* lhead = HP.protect(kHpHead,head.load(),tid);   //protect the current segment
         while(true){
 #ifndef DISABLE_HAZARD
+            //HP.retire(nullptr,tid); 
             Segment *lhead2 = head.load();
             if(lhead2 != lhead){
+                //Someone updated the current head so let's try to deallocate the list
                 lhead = HP.protect(kHpHead,lhead2,tid);
                 continue;
             }           
@@ -159,11 +173,13 @@ public:
             if (item == nullptr) {
                 Segment* lnext = lhead->next.load(); //if unsuccesful pop then try to load next semgnet
                 if (lnext != nullptr) { //if next segments exist
-                    item = lhead->pop(tid); //DequeueAfterNextLinked(lnext)
-                    if (item == nullptr) {
-                        if (head.compare_exchange_strong(lhead, lnext)) {   //changes shared head pointer
-                            uint64_t deleted = HP.retire(lhead, tid); //tries to deallocate current segment
-                            lhead = HP.protect(kHpHead, lnext, tid); //protect new segment
+                    item = lhead->pop(tid); //DequeueAfterNextLinked(lnext) -> in teoria lo posso anche togliere [doppio check inutile]
+                    if (item == nullptr){
+                        //changes the head;
+                        if (head.compare_exchange_strong(lhead, lnext)) {
+                            Segment* oldHead = lhead;
+                            lhead = HP.protect(kHpHead, lnext, tid); //protect new segment [dropping protection on the old one]
+                            HP.retire(oldHead,tid); //retire old segment
                             //update headIndex
                             headIndex.fetch_add(1,std::memory_order_release);  
                         } else {
@@ -172,6 +188,7 @@ public:
                         continue;
                     }
                 }
+
             }
 
             HP.clear(kHpHead,tid); //after pop removes protection on the current segment
@@ -202,6 +219,10 @@ public:
      */
     inline size_t capacity() const {
         return sizeRing;
+    }
+
+    uint64_t getSegmentCount() const{
+        return tailIndex.load(std::memory_order_acquire);
     }
 
 };
