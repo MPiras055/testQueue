@@ -2,12 +2,13 @@
 
 #! /usr/bin/env python3
 import subprocess
-import sys
+import sys,os
 import numpy as np
 
-START_DIR = './build/'
+#START_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),'../build/')
+START_DIR = "../build/"
 
-EXEC = 10000
+EXEC = 100
 
 def halt_avg(program: list):
     program[0] =  START_DIR + program[0][2:] 
