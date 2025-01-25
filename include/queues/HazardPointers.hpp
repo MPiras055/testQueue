@@ -77,7 +77,7 @@ public:
      * @brief Clear all hazard pointers for a given thread
      * @param tid (int) thread id
      */
-    void clear(const int tid){
+    __attribute__((used,always_inline)) void clear(const int tid){
         for(int iHP = 0; iHP < maxHPs; iHP++){
             Hazard[tid * CLPAD][iHP].store(nullptr,std::memory_order_release);
         }
@@ -88,7 +88,7 @@ public:
      * @param iHP (int) index of the hazard pointer
      * @param tid (int) thread id
      */
-    void clear(const int iHP, const int tid){
+    __attribute__((used,always_inline)) void clear(const int iHP, const int tid){
         Hazard[tid * CLPAD][iHP].store(nullptr,std::memory_order_release);
     }
 
@@ -100,7 +100,7 @@ public:
      * 
      * @return the value of the pointer
      */
-    T* protect(const int index, const std::atomic<T*>& atom, const int tid){
+    __attribute__((used,always_inline)) T* protect(const int index, const std::atomic<T*>& atom, const int tid){
         T* n = nullptr;
         T* ret;
 
@@ -120,7 +120,7 @@ public:
      * @return the value of the pointer
      * @note This function is used when the pointer is not an atomic
      */
-    T* protect(const int index, T* ptr, const int tid){
+    __attribute__((used,always_inline)) T* protect(const int index, T* ptr, const int tid){
         Hazard[tid * CLPAD][index].store(ptr);
         return ptr;
     }
@@ -134,7 +134,7 @@ public:
      * @return the value of the pointer
      * @note This function is used when the pointer is not an atomic
      */
-    T* protectRelease(const int index, const T* ptr, const int tid){
+    __attribute__((used,always_inline)) T* protectRelease(const int index, T* ptr, const int tid){
         Hazard[tid*CLPAD][index].store(ptr,std::memory_order_release);
         return ptr;
     }
@@ -153,7 +153,7 @@ public:
      * @note the function return value can be ignored, it's just a hack for Bounded queue because we can use an atomic counter to 
      * keep track of the current segment allocation.
      */
-    void retire(T* ptr, const int tid,bool check_thresh = false) 
+    __attribute__((used,always_inline)) void retire(T* ptr, const int tid,bool check_thresh = false) 
     {
         if(ptr != nullptr) Retired[tid*CLPAD].push_back(ptr);
         if(check_thresh && Retired[tid*CLPAD].size() < THRESHOLD_R){

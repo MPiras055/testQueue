@@ -3,9 +3,12 @@
 #include <chrono>
 #include <barrier>
 #include <thread>
+#include <chrono>
 #include "QueueTypeSet.hpp"
 #include "AdditionalWork.hpp"
 #include "ThreadStruct.hpp"
+
+#define MAX_BACKOFF 10
 
 #define DEBUG 0
 
@@ -22,6 +25,11 @@ template<template<typename> typename Q>
 void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int tid){
     const size_t min_wait = args->min_wait;
     const size_t max_wait = args->max_wait;
+
+    //Only used for bounded queues
+    uint64_t backoff = 0;
+
+
 #ifndef DEBUG
     Data item(tid,0);
 #else
@@ -36,19 +44,21 @@ void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int ti
     int j = 0;
     (args->consumerBarrier)->arrive_and_wait(); //all threads barrier
     for(size_t i = 0; i < data; i++){
-
+        random_work(min_wait,max_wait);
 #ifdef DEBUG
         //reference necessary to avoid out of scope access
         Data &item = items[i];  
 #endif
         if constexpr (BoundedQueues::Contains<Q>){
-            if(!queue->push(&item,tid)){
-                --i;    //try new iteration (do random_work before)
-            }
+            while(!queue->push(&item,tid)){
+                if(backoff++ >= MAX_BACKOFF){
+                    std::this_thread::sleep_for(std::chrono::nanoseconds{50});
+                }
+            }; //retry until successful push
+            backoff = 0;
         } else {
             queue->push(&item,tid);
         }
-        random_work(min_wait,max_wait);
     }
     (args->producerBarrier)->arrive_and_wait();
     (args->consumerBarrier)->arrive_and_wait();
@@ -63,7 +73,7 @@ void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int ti
  * and queue is empty
  */
 template<template<typename> typename Q>
-void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const int tid){
+void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, std::vector<size_t> *lastSeen_param, const int tid){ //passo io il puntatore a last seen
     const size_t min_wait = args->min_wait;
     const size_t max_wait = args->max_wait;
     size_t consumerTransfer = 0;
@@ -71,7 +81,8 @@ void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const 
     /*  each producer gets a size_t vector to check queue semantics over
         items inserted by all producers 
     */
-    std::vector<size_t> lastSeen(args->producers,0);  
+    //std::vector<size_t> lastSeen(args->producers,0);  
+    std::vector<size_t> &lastSeen = *lastSeen_param;  //reference to avoid out of scope access
 #endif
     Data *popped = nullptr;
 
@@ -118,7 +129,7 @@ void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const 
  */
 template< template <typename> typename Q>
 long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t items,size_t min_wait,size_t max_wait){
-    Q<Data> queue(size_queue, producers + consumers + 1);
+    Q<Data> * queue = new Q<Data>(size_queue, producers + consumers + 1);
     std::barrier<> threadBarrier(producers + consumers + 1); //(producers + 1 producer + 1 main thread)
     std::barrier<> producerBarrier(producers + 1);
     std::atomic<bool> stopFlag{false}; //flag to signal consumer that producers are done
@@ -142,15 +153,19 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
         producerItems[i]++;
     }
 
+    std::vector<std::vector<size_t>> lastSeenMatrix(consumers,std::vector<size_t>(producers,0));
+
+
     //schedule producers
     for(int tid = 0; tid < producers ; tid++){
-        threads.emplace_back(producerRoutine<Q>,&queue,&arg,producerItems[tid],tid);
+        threads.emplace_back(producerRoutine<Q>,queue,&arg,producerItems[tid],tid);
     }
 
     //schedule consumer
     std::vector<size_t> consumerResult(consumers,0);
     for(int tid = producers; tid < producers + consumers ; tid++){
-        threads.emplace_back(consumerRoutine<Q>,&queue,&arg,&consumerResult[tid-producers],tid);
+        int tid_consumer = tid - producers;
+        threads.emplace_back(consumerRoutine<Q>,queue,&arg,&consumerResult[tid-producers],&(lastSeenMatrix[tid_consumer]),tid_consumer);
     }
     threadBarrier.arrive_and_wait();
     auto start = std::chrono::high_resolution_clock::now();
@@ -161,6 +176,7 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
     for(auto &t : threads){
         t.join();
     }
+    delete queue;
 
 #ifdef DEBUG
     /*  assert that the sum of the items dequeued by each consumer 
@@ -169,7 +185,27 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
     for(auto &t : consumerResult){
         totalTransfers += t;
     }
-    assert(totalTransfers == items);
+    
+    if(totalTransfers != items){
+        //calculate the last item seen from each producer thread
+        std::vector<size_t> lastSeenProducer(producers,0);
+        for(int i = 0; i < consumers; i++){
+            for(int j = 0; j < producers; j++){
+                if(lastSeenMatrix[i][j] > lastSeenProducer[j]){
+                    lastSeenProducer[j] = lastSeenMatrix[i][j];
+                }
+            }
+        }
+
+        //stampa il vettore
+        std::cerr << "Last seen: ";
+        for(auto &i : lastSeenProducer){
+            std::cerr << i << " ";
+        }
+        std::cerr << std::endl;
+        std::cerr << "Assertion failed: "  << totalTransfers << " != " << items << std::endl;
+        exit(1);
+    }
 #endif
 
     std::chrono::nanoseconds time = end - start;

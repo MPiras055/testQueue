@@ -99,7 +99,7 @@ public:
             }
 
             //if failed insertion then current segment is full (allocate a new one)
-            Segment* newTail = new Segment(sizeRing,0,ltail->getTailIndex());
+            Segment* newTail = new Segment(sizeRing,0,ltail->getTailIndex()-1);
             newTail->push(item,tid);    //push in the segment (always successful since there's no other thread)
 
             Segment* nullSegment = nullptr;

@@ -10,7 +10,7 @@ set(HEADER_DIRS
 set(Debug_compile_opt "-O0 -g -DDEBUG -fsanitize=address")
 set(Debug_link "-fsanitize=address")
 set(Release_compile_opt "-O3")
-set(Release_link "-fsanitize=address")
+set(Release_link " ")
 
 # ------------------- Automation -------------------- #
 # Function to create an executable and apply common settings

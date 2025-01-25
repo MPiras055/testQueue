@@ -2,7 +2,7 @@
 #include <iostream>
 #include <atomic>
 #include "LinkedRingQueue.hpp"
-#include "BoundedSegmentCounter.hpp"
+#include "BoundedElementCounter.hpp"
 #include "RQCell.hpp"
 #include <iostream>
 
@@ -128,7 +128,7 @@ public:
     __attribute__((used,always_inline)) bool push(T* item,[[maybe_unused]] const int tid = 0) {
         
         while (true) {
-            uint64_t tailticket = Base::tail.fetch_add(1,std::memory_order_acquire);
+            uint64_t tailticket = Base::tail.fetch_add(1);
             if (Base::isClosed(tailticket)) {
                 return false;
             }
@@ -178,7 +178,7 @@ public:
 #endif
 
         while (true) {
-            uint64_t headticket = Base::head.fetch_add(1,std::memory_order_acquire);
+            uint64_t headticket = Base::head.fetch_add(1);
 #ifndef DISABLE_POW2
             Cell& cell = array[headticket & mask];
 #else

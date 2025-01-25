@@ -8,7 +8,7 @@ import numpy as np
 #START_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),'../build/')
 START_DIR = "../build/"
 
-EXEC = 100
+EXEC = 1000
 
 def halt_avg(program: list):
     program[0] =  START_DIR + program[0][2:] 

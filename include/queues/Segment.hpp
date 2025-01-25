@@ -75,13 +75,7 @@ public:
      * 
      */
     inline bool closeSegment(const uint64_t tailTicket) {
-        // if(!force) {
-        //     uint64_t tmp = tailTicket +1;
-        //     return tail.compare_exchange_strong(tmp,(tailTicket + 1) | (1ull << 63));
-        // } else {
-        //     return BIT_TEST_AND_SET63(&(tail));
-        // }
-        uint64_t tmp = tailTicket + 1;
+        uint64_t tmp = tailTicket + 1;  //accounts for fetch add operation
         return tail.compare_exchange_strong(tmp,(tailTicket + 1) | (1ull << 63));
     }
 

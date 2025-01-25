@@ -4,7 +4,7 @@
 #include <cassert>
 
 #include "LinkedRingQueue.hpp"
-#include "BoundedSegmentCounter.hpp"
+#include "BoundedElementCounter.hpp"
 #include "RQCell.hpp"
 #include "x86Atomics.hpp"
 
@@ -15,8 +15,8 @@ private:
 
     using Base = QueueSegmentBase<T, CRQueue<T, padded_cells>>;
     using Cell = detail::CRQCell<T *, padded_cells>;
-
     size_t sizeRing;
+
 #ifndef DISABLE_POW2
     size_t mask;  //Mask to execute the modulo operation
 #endif
@@ -118,9 +118,8 @@ public:
     {
         while (true)
         {
-            uint64_t tailTicket = Base::tail.fetch_add(1,std::memory_order_acquire);
+            uint64_t tailTicket = Base::tail.fetch_add(1);
 
-            
             if(Base::isClosed(tailTicket)){
                 return false;
             }
@@ -168,7 +167,7 @@ public:
 #endif
         while (true)
         {
-            uint64_t headTicket = Base::head.fetch_add(1,std::memory_order_acquire);
+            uint64_t headTicket = Base::head.fetch_add(1);
 #ifndef DISABLE_POW2
             Cell &cell = array[headTicket & mask];
 #else
@@ -207,7 +206,7 @@ public:
 
                     int closed = Base::isClosed(tt);
                     uint64_t t = Base::tailIndex(tt);
-                    if (unsafe || t < headTicket + 1 || closed || r > 4 * 1024 )
+                    if (unsafe || t < headTicket + 1 || closed || r > (4 * 1024) )
                     {
                         if (CAS2((void **)&cell, val, cell_idx, val, unsafe | (headTicket + sizeRing)))
                             break;

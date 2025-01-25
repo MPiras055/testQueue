@@ -7,7 +7,8 @@ import numpy as np
 P_DIR = None
 EXEC = "ManyToMany"
 TESTS = ["oneToMany","manyToOne","manyToMany","oneToOne"]
-QUEUES = ["BoundedCRQueue","BoundedPRQueue","BoundedMTQueue","BoundedMuxQueue","LinkedPRQueue","LinkedMTQueue","LinkedCRQueue","LinkedMuxQueue","FAAArrayQueue"]
+#QUEUES = ["BoundedCRQueue","BoundedPRQueue","BoundedMTQueue","BoundedMuxQueue","LinkedPRQueue","LinkedMTQueue","LinkedCRQueue","LinkedMuxQueue","FAAArrayQueue"]
+QUEUES = ["BoundedCRQueue","BoundedPRQueue"]
 THREADS = [1,2,4,8,12,16,24,32,48,64,96,112,128]
 
 OPS = 1_000_000 #number of operations
@@ -33,8 +34,6 @@ def check_queues()->list:
             invalidQueues.append(q)
         else: print(f"{q} is valid")
     return invalidQueues
-
-        
 
 """
     fresh update cmake changes and compile all executables
@@ -160,10 +159,14 @@ def runManyToOne():
                     writer.writerow({"Queue":q,"Producers":t,"Consumers":1,"Size":s,"Items":OPS,"Runs":RUNS,"Score":avg,"Score Error":std})
     return
 
-def runManyToMany():
+
+"""
+Pass a list of tuples with the number of producers and consumers
+"""
+def runManyToMany(threads: list[tuple[int,int]],outfile:str):
     projectDir = f"{getProjectDir()}/build"
     threads = THREADS[:-3]
-    with open("../ManyToMany.csv",mode="w",newline="") as file:
+    with open(outfile,mode="w",newline="") as file:
         filednames = ["Queue","Producers","Consumers","Size","Items","Runs","Score","Score Error"]
         writer = csv.DictWriter(file,fieldnames=filednames)
         writer.writeheader()
@@ -174,7 +177,8 @@ def runManyToMany():
                 for s in SIZE:
                     results:list = []
                     for i in range(RUNS):
-                        proc = subprocess.run([f"./{EXEC}",q,str(t),str(t),str(s),str(OPS),"0","1"],cwd=projectDir,stdout=subprocess.PIPE)
+                        #add perf support
+                        proc = subprocess.run([f"./{EXEC}",q,str(t[0]),str(t[1]),str(s),str(OPS),"0","1"],cwd=projectDir,stdout=subprocess.PIPE)
                         if proc.returncode != 0:
                             print(f"Error in runManyToMany for queue {q} run {i}")
                             continue
@@ -201,12 +205,6 @@ def main():
     if len(invalidQueues) > 0:
         print(f"Invalid queues found: {invalidQueues}")
         return
-    runOneToOne()
-    print("OneToOne done")
-    runOneToMany()
-    print("OneToMany done")
-    runManyToOne()
-    print("ManyToOne done")
     runManyToMany()
     print("ManyToMany done")
 
