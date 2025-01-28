@@ -1,47 +1,53 @@
 #pragma once
 
-#include <atomic>
-#include <cassert>
+#include "LinkedAdapter.hpp"
+#include "BoundedSegmentAdapter.hpp"
+#include "BoundedItemAdapter.hpp"
 
-#include "LinkedRingQueue.hpp"
-#include "BoundedElementCounter.hpp"
+#include "CacheRemap.hpp"
 #include "RQCell.hpp"
 #include "x86Atomics.hpp"
 
+#ifndef TRY_CLOSE_CRQ 
+#define TRY_CLOSE_CRQ 10
+#endif
 
 template <typename T, bool padded_cells>
 class CRQueue : public QueueSegmentBase<T, CRQueue<T, padded_cells>> {
 private:
-
     using Base = QueueSegmentBase<T, CRQueue<T, padded_cells>>;
     using Cell = detail::CRQCell<T *, padded_cells>;
-    size_t sizeRing;
+    Cell *array;
 
+    const size_t sizeRing;
+    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
 #ifndef DISABLE_POW2
     size_t mask;  //Mask to execute the modulo operation
 #endif
-    Cell *array;
-
     /** 
      * @brief returns the index of the current node [without the MSB]
      * */
-    inline uint64_t nodeIndex(uint64_t i) const{
+    inline uint64_t node_index(uint64_t i) const {
         return (i & ~(1ull << 63));
     }
     /** 
      * @brief checks if a node is unsafe
+     * 
+     * @note checks the MSB of the index
      * */
-    inline bool nodeUnsafe(uint64_t i) const {
-        return i & (1ull << 63);
+    inline uint64_t node_unsafe(uint64_t i) const {
+        return (i & (1ull << 63));
     }
     /** 
      * @brief sets the unsafe bit of a given index 
+     * 
+     * @note sets the MSB of the index
      */
-    inline uint64_t setUnsafe(uint64_t i) const {
+    inline uint64_t set_unsafe(uint64_t i) const {
         return (i | (1ull << 63));
     }
 
-private:
+public:
     /**
      * @brief Private Constructor for CRQ segment
      * 
@@ -49,30 +55,35 @@ private:
      * @param tid (int) thread id [not used]
      * @param start (uint64_t) start index of the segment [useful for LinkedRing Adaptation]
      * 
-     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
      */
     CRQueue(size_t size_par,[[maybe_unused]] const int tid, const uint64_t start): Base(), 
 #ifndef DISABLE_POW2
-    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)},
-    mask{sizeRing - 1}
+    //we could want to initialize a segment as 0 as a sentinel
+    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
+    mask{sizeRing - 1},  //sets the mask to perform modulo operation
 #else
-    sizeRing{size_par}
+    sizeRing{size_par},
 #endif
+    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(sizeRing)) //initialize the cache remap
     {
-        assert(size_par > 0);
         array = new Cell[sizeRing];
 
-        for(uint64_t i = start; i < start + sizeRing; ++i){
-            array[i % sizeRing].val.store(nullptr,std::memory_order_relaxed);
-            array[i % sizeRing].idx.store(i,std::memory_order_relaxed);           
+        //sets the fields of the Cell given the startingIndex (default 0)
+        for (uint64_t i = start; i < start + sizeRing; i++) {
+#ifdef DISABLE_POW2
+            array[remap[i % sizeRing]].val.store(nullptr, std::memory_order_relaxed);
+            array[remap[i % sizeRing]].idx.store(i, std::memory_order_relaxed);
+#else
+            array[remap[i & mask]].val.store(nullptr, std::memory_order_relaxed);
+            array[remap[i & mask]].idx.store(i, std::memory_order_relaxed);
+#endif
+            
         }
-
-        Base::head.store(start,std::memory_order_relaxed);
-        Base::tail.store(start,std::memory_order_relaxed);
+        Base::head.store(start, std::memory_order_relaxed);
+        Base::tail.store(start, std::memory_order_relaxed);
     }
-
-
-public: 
+    
     /**
      * @brief Constructor for CRQ segment
      * 
@@ -81,7 +92,7 @@ public:
      * 
      * Constructs a new CRQ bounded segment with given sizeRing
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      */
     CRQueue(size_t size_par,[[maybe_unused]] const int tid = 0): CRQueue(size_par,tid,0){}
 
@@ -110,42 +121,37 @@ public:
      * 
      * @returns (bool) true if the operation is successful
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      * @note if queue is instantiated as bounded then the segment never closes
      * @warning uses 2CAS operation implemented as asm routines in x86Atomics.hpp
      */
     __attribute__((used,always_inline)) bool push(T *item,[[maybe_unused]] const int tid = 0)
     {
-        while (true)
-        {
-            uint64_t tailTicket = Base::tail.fetch_add(1);
+        int try_close = 0;
 
-            if(Base::isClosed(tailTicket)){
+        while (true) {
+            uint64_t tailticket = Base::tail.fetch_add(1);
+            if (Base::isClosed(tailticket)) {
                 return false;
             }
-            
-#ifndef DISABLE_POW2
-            Cell &cell = array[tailTicket & mask];
+#ifdef DISABLE_POW2
+            Cell& cell = array[remap[tailticket % sizeRing]];
 #else
-            Cell &cell = array[tailTicket % sizeRing];
+            Cell& cell = array[remap[tailticket & mask]];
 #endif
             uint64_t idx = cell.idx.load();
-            if (cell.val.load() == nullptr )
-            {
-                if (nodeIndex(idx) <= tailTicket)
-                {
-                    if ((!nodeUnsafe(idx) || Base::head.load() < tailTicket))
-                    {
-                        if (CAS2((void **)&cell, nullptr, idx, item, tailTicket))
+            if (cell.val.load() == nullptr) {
+                if (node_index(idx) <= tailticket) {
+                    if ((!node_unsafe(idx) || Base::head.load() < tailticket)) {
+                        if (CAS2((void**)&cell, nullptr, idx, item, tailticket)) {
                             return true;
+                        }
                     }
                 }
             }
-
-            if(tailTicket >= Base::head.load() + sizeRing)
-            {
-                Base::closeSegment(tailTicket);
-                return false;
+            if (tailticket >= Base::head.load() + sizeRing) {
+                if (Base::closeSegment(tailticket,try_close++ < TRY_CLOSE_CRQ))
+                    return false;
             }
         }
     }
@@ -157,70 +163,64 @@ public:
      * 
      * @returns (T*) item popped from the queue [nullptr if the queue is empty]
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      * @warning uses 2CAS operation implemented as asm routines in x86Atomics.hpp
      */
-    __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid = 0)
-    {
-#ifdef CAUTIOUS_DEQUEUE //checks if the queue is empty before trying operations
-        if (Base::isEmpty()) return nullptr;
+    __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid = 0){
+#ifdef CAUTIOUS_DEQUEUE
+        if (Base::isEmpty())
+            return nullptr;
 #endif
-        while (true)
-        {
-            uint64_t headTicket = Base::head.fetch_add(1);
-#ifndef DISABLE_POW2
-            Cell &cell = array[headTicket & mask];
+
+        while (true) {
+            uint64_t headticket = Base::head.fetch_add(1);
+#ifdef DISABLE_POW2
+            Cell& cell = array[remap[headticket % sizeRing]];
 #else
-            Cell &cell = array[headTicket % sizeRing];
+            Cell& cell = array[remap[headticket & mask]];
 #endif
 
             int r = 0;
             uint64_t tt = 0;
 
-            while (true)
-            {
+            while (true) {
                 uint64_t cell_idx = cell.idx.load();
-                uint64_t unsafe = nodeUnsafe(cell_idx);
-                uint64_t idx = nodeIndex(cell_idx);
-                T *val = static_cast<T *>(cell.val.load());
+                uint64_t unsafe = node_unsafe(cell_idx);
+                uint64_t idx = node_index(cell_idx);
+                T* val = static_cast<T*>(cell.val.load());
 
-                if (idx > headTicket) break;
+                if (idx > headticket)
+                    break;
 
-                if (val != nullptr)
-                {   //Dequeue transition
-                    if (idx == headTicket)
-                    {
-                        if (CAS2((void **)&cell, val, cell_idx, nullptr, unsafe | (headTicket + sizeRing)))
+                if (val != nullptr) {
+                    if (idx == headticket) {
+                        if (CAS2((void**)&cell, val, cell_idx, nullptr, unsafe | (headticket + sizeRing))) {
                             return val;
-                    }
-                    else
-                    {//Unsafe transition [headTicket > idx]
-                        if (CAS2((void **)&cell, val, cell_idx, val, setUnsafe(idx)))
+                        }
+                    } else {
+                        if (CAS2((void**)&cell, val, cell_idx, val, set_unsafe(idx)))
                             break;
                     }
-                }
-                else
-                {//Empty cell (Advance the index to next epoch)
+                } else {
                     if ((r & ((1ull << 8) - 1)) == 0)
                         tt = Base::tail.load();
 
-                    int closed = Base::isClosed(tt);
+                    int crq_closed = Base::isClosed(tt);
                     uint64_t t = Base::tailIndex(tt);
-                    if (unsafe || t < headTicket + 1 || closed || r > (4 * 1024) )
-                    {
-                        if (CAS2((void **)&cell, val, cell_idx, val, unsafe | (headTicket + sizeRing)))
+                    if (unsafe || t < headticket + 1 || crq_closed || r > 4*1024) {
+                        if (CAS2((void**)&cell, val, cell_idx, val, unsafe | (headticket + sizeRing)))
                             break;
                     }
                     ++r;
                 }
             }
 
-            if (Base::tailIndex(Base::tail.load()) <= headTicket)
-            {
+            if (Base::tailIndex(Base::tail.load()) <= headticket + 1) {
                 Base::fixState();
-                return nullptr; //empty queue
+                return nullptr;
             }
         }
+            
     }
 
     /**
@@ -228,7 +228,7 @@ public:
      * 
      * @param tid (int) thread id [not used]
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
         return Base::length();
@@ -243,21 +243,26 @@ public:
     inline size_t capacity() const {
         return sizeRing;
     }
-
-    friend class LinkedRingQueue<T,CRQueue<T,padded_cells>>;   //LinkedRingQueue can access private class members 
-    friend class BoundedLinkedAdapter<T,CRQueue<T,padded_cells>>; //BoundedLinkedAdapter can access private class members
 };
 
 /**
  * Alias for easy instantiation
+ * 
+ * @class BoundedSegmentCRQueue [bounded queue that performs conditionals over segment count]
+ * @class BoundedItemCRQueue [bounded queue that performs conditionals over item count]
+ * @class LCRQueue
  */
 template <typename T>
 #ifdef DISABLE_PADDING
-using BoundedCRQueue = BoundedLinkedAdapter<T, CRQueue<T, false>>;
+using BoundedSegmentCRQueue = BoundedSegmentAdapter<T, CRQueue<T, false>>;
 template <typename T>
-using LCRQueue = LinkedRingQueue<T, CRQueue<T, false>>;
+using BoundedItemCRQueue = BoundedItemAdapter<T, CRQueue<T, false>>;
+template <typename T>
+using LCRQueue = LinkedAdapter<T, CRQueue<T, false>>;
 #else
-using BoundedCRQueue = BoundedLinkedAdapter<T, CRQueue<T, true>>;
+using BoundedSegmentCRQueue = BoundedSegmentAdapter<T, CRQueue<T, true>>;
 template <typename T>
-using LCRQueue = LinkedRingQueue<T, CRQueue<T, true>>;
+using BoundedItemCRQueue = BoundedItemAdapter<T, CRQueue<T, false>>;
+template <typename T>
+using LCRQueue = LinkedAdapter<T, CRQueue<T, true>>;
 #endif

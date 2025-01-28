@@ -37,23 +37,38 @@ def halt_avg(program: list):
 
     #print('Program did not halt')
 
-def halt(program: list):
+#to test
+
+
+
+def halt(program: list,template = False):
+    queues_to_test = ["LinkedCRQueue","LinkedPRQueue","BoundedSegmentCRQueue","BoundedSegmentPRQueue","BoundedItemCRQueue","BoundedItemPRQueue"]
     program[0] =  START_DIR + program[0][2:] 
-    values = []
-    for i in range(EXEC):
-        proc = subprocess.Popen(program,stderr=subprocess.PIPE)
-        print('Step:', round(i / EXEC * 100,2), '%')
-        proc.wait()
-        #if stderr is not empty then return immediately
-        if proc.stderr:
-            #print stderr 
-            line_count = 0
-            for line in proc.stderr:
-                line_count += 1
-                print("HERE")
-                print(line)
-            if line_count > 0 : return
+    
+    procs = []
+
+    if template:
+        for q in queues_to_test:
+            process = program.copy()
+            process[1] = q
+            procs.append(process)
+    else: procs.append(program)
+
+    for program in procs:
+        for i in range(EXEC):
+            proc = subprocess.Popen(program,stderr=subprocess.PIPE)
+            print('Step:', round(i / EXEC * 100,2), '%')
+            proc.wait()
+            #if stderr is not empty then return immediately
+            if proc.stderr:
+                #print stderr 
+                line_count = 0
+                for line in proc.stderr:
+                    line_count += 1
+                    print(line)
+                if line_count > 0 : return
+            
 
     #print('Program did not halt')
 
-halt(sys.argv[1:])
+halt(sys.argv[1:],False)

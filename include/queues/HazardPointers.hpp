@@ -3,7 +3,6 @@
 #include <atomic>
 #include <cassert>
 #include <vector>
-#include <iostream>
 
 #ifndef DISABLE_HAZARD
 
@@ -43,16 +42,18 @@ public:
      * 
      * 
      * @note The constructor asserts that maxHPs is less than or equal to `MAX_HP_PER_THREAD` and maxThreads is less than or equal to `MAX_THREADS`
-     * 
      */
     HazardPointers(int maxHPs=MAX_HP_PER_THREAD, int maxThreads=MAX_THREADS):
-    maxHPs{maxHPs},
-    maxThreads{maxThreads}
+    maxHPs{maxHPs}, maxThreads{maxThreads}
     {
         assert(maxHPs <= MAX_HP_PER_THREAD);
         assert(maxThreads <= MAX_THREADS);
-        for(int iThread = 0; iThread < MAX_THREADS; iThread++){
-            for(int iHP = 0; iHP < MAX_HP_PER_THREAD; iHP++){
+
+        /**
+         * Initialize only the cells that will be used by the threads
+         */
+        for(int iThread = 0; iThread < maxThreads; iThread++){
+            for(int iHP = 0; iHP < maxHPs; iHP++){
                 Hazard[iThread*CLPAD][iHP].store(nullptr,std::memory_order_relaxed);
             }
         }
@@ -61,7 +62,7 @@ public:
     /**
      * @brief Destructor for hazard pointers matrix
      * 
-     * Deletes all pointers in the retired list
+     * Deallocates all pointers in the retired list
      */
     ~HazardPointers() 
     {
@@ -76,6 +77,7 @@ public:
     /**
      * @brief Clear all hazard pointers for a given thread
      * @param tid (int) thread id
+     * 
      */
     __attribute__((used,always_inline)) void clear(const int tid){
         for(int iHP = 0; iHP < maxHPs; iHP++){
@@ -98,7 +100,9 @@ public:
      * @param atom (std::atomic<T*>&) pointer to protect
      * @param tid (int) thread id
      * 
+     * @warning If the tid exeeds the maximum number of thread (given to constructor) the function doesn't protect the pointer
      * @return the value of the pointer
+     * 
      */
     __attribute__((used,always_inline)) T* protect(const int index, const std::atomic<T*>& atom, const int tid){
         T* n = nullptr;
@@ -150,8 +154,7 @@ public:
      * 
      * @note If the number of retired pointers is greater than `THRESHOLD_R`, the function checks if the pointer can be deleted
      * 
-     * @note the function return value can be ignored, it's just a hack for Bounded queue because we can use an atomic counter to 
-     * keep track of the current segment allocation.
+     * @note if the pointer is nullptr tries to deallocate all the retired list
      */
     __attribute__((used,always_inline)) void retire(T* ptr, const int tid,bool check_thresh = false) 
     {
@@ -164,9 +167,7 @@ public:
 
             bool canDelete = true;
 
-            /**
-             * check matrix to see if the object is still in use
-             */
+            //check matrix to see if the object is still in use
             for(int tid = 0; tid < maxThreads && canDelete; tid++){
                 for(int iHP = maxHPs -1; iHP >= 0; iHP--){
                     if(Hazard[tid*CLPAD][iHP].load() == obj){

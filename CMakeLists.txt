@@ -7,10 +7,10 @@ set(HEADER_DIRS
     ${CMAKE_SOURCE_DIR}/include/utils    
 )
 
-set(Debug_compile_opt "-O0 -g -DDEBUG -fsanitize=address")
-set(Debug_link "-fsanitize=address")
+set(Debug_compile_opt " -O0 -g -DDEBUG -fsanitize=address ")
+set(Debug_link "-fsanitize=address -lnuma")
 set(Release_compile_opt "-O3")
-set(Release_link " ")
+set(Release_link "-lnuma")
 
 # ------------------- Automation -------------------- #
 # Function to create an executable and apply common settings
@@ -28,9 +28,12 @@ function(add_benchmark exec_name)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set_target_properties(${exec_name} PROPERTIES COMPILE_FLAGS ${Debug_compile_opt})
         set_target_properties(${exec_name} PROPERTIES LINK_FLAGS ${Debug_link})
+
+        target_compile_options(${exec_name} PUBLIC ${Debug_compile_opt})
+        target_link_libraries(${exec_name} ${Debug_link})
     else()
-        set_target_properties(${exec_name} PROPERTIES COMPILE_FLAGS ${Release_compile_opt})
-        set_target_properties(${exec_name} PROPERTIES LINK_FLAGS ${Release_link})
+        target_compile_options(${exec_name} PUBLIC ${Release_compile_opt})
+        target_link_libraries(${exec_name} ${Release_link})
     endif()
 endfunction()
 
@@ -54,6 +57,7 @@ add_benchmark(ManyToOne
 
 add_benchmark(ManyToMany
     ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToMany.cpp 
+    ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
 )
 
     

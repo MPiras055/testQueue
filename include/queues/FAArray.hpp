@@ -1,10 +1,9 @@
 #pragma once
-#include <atomic>
 #include <cmath>
 #include <cstring>
-#include <cstddef>
 #include "RQCell.hpp"
 #include "HazardPointers.hpp"
+#include "CacheRemap.hpp"
 
 #ifndef CACHE_LINE
 #define CACHE_LINE 64
@@ -21,6 +20,8 @@ private:
     HazardPointers<Node> HP;
     const int kHpTail = 0;
     const int kHpHead = 1;
+    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
+
 
     alignas(CACHE_LINE) std::atomic<Node*> head;
     alignas(CACHE_LINE) std::atomic<Node*> tail;
@@ -40,20 +41,18 @@ private:
     struct Node {
         alignas(CACHE_LINE) std::atomic<size_t>    deqidx;
         alignas(CACHE_LINE) std::atomic<size_t>    enqidx;
-        alignas(CACHE_LINE) std::atomic<Node*>  next;
+        alignas(CACHE_LINE) std::atomic<Node*>     next;
         Cell *items;
         const uint64_t startIndexOffset;
 
         //First entry prefilled [Sentinel]
-        Node(T* item, uint64_t startIndexOffset,size_t Buffer_Size=128):
+        Node(T* item, uint64_t startIndexOffset,size_t Buffer_Size,FAAArrayQueue& outerQueue):
         deqidx{0}, enqidx{1},
         next{nullptr}, startIndexOffset(startIndexOffset)
         {
             items = new Cell[Buffer_Size];
-            items[0].val.store(item,std::memory_order_relaxed);
-            for(size_t i = 1; i < Buffer_Size; i++){
-                items[i].val.store(nullptr,std::memory_order_relaxed);
-            }
+            std::memset(items, 0, sizeof(items));
+            items[outerQueue.remap[0]].val.store(item,std::memory_order_relaxed);
         }
 
         ~Node(){
@@ -97,10 +96,11 @@ public:
      */
     FAAArrayQueue(size_t Buffer_Size, size_t maxThreads):
     sizeRing{Buffer_Size},maxThreads{maxThreads},
-    HP(2,maxThreads)
+    HP(2,maxThreads),
+    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(Buffer_Size))
     {
         assert(Buffer_Size > 0);
-        Node* sentinelNode = new Node(nullptr,0,Buffer_Size);
+        Node* sentinelNode = new Node(nullptr,0,Buffer_Size,*this);
         sentinelNode->enqidx.store(0,std::memory_order_relaxed);
         head.store(sentinelNode, std::memory_order_relaxed);
         tail.store(sentinelNode, std::memory_order_relaxed);
@@ -161,7 +161,7 @@ public:
                 if(ltail != tail.load()) continue;
                 Node* lnext = ltail->next.load(); 
                 if(lnext == nullptr) {
-                    Node* newNode = new Node(item,ltail->startIndexOffset + sizeRing, sizeRing);
+                    Node* newNode = new Node(item,ltail->startIndexOffset + sizeRing, sizeRing,*this);
                     if(ltail->casNext(nullptr,newNode)) {
                         casTail(ltail, newNode);
                         HP.clear(kHpTail,tid);
@@ -175,7 +175,7 @@ public:
             }
 
             T* itemNull = nullptr;
-            if(ltail->items[idx].val.compare_exchange_strong(itemNull,item)) {
+            if(ltail->items[remap[idx]].val.compare_exchange_strong(itemNull,item)) {
                 HP.clear(kHpTail,tid);
                 return;
             }
@@ -213,7 +213,7 @@ public:
                 lhead = HP.protect(kHpHead, head, tid);
                 continue;
             }
-            Cell& cell = lhead->items[idx];
+            Cell& cell = lhead->items[remap[idx]];
             if (cell.val.load() == nullptr && idx < lhead->enqidx.load()) {
                 for (size_t i = 0; i < 4*1024; ++i) {
                     if (cell.val.load() != nullptr)

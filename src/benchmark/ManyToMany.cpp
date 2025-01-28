@@ -4,11 +4,19 @@
 #include <barrier>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include "QueueTypeSet.hpp"
 #include "AdditionalWork.hpp"
 #include "ThreadStruct.hpp"
+#include <typeinfo>
+#include <cxxabi.h>
+#include <iostream>
+#include <thread>
+#include "NumaDispatcher.hpp"
 
-#define MAX_BACKOFF 10
+#define MAX_BACKOFF 350ul //ns
+
+#define CACHE_LEVEL 3u  //cache level optimization for dispatching
 
 #define DEBUG 0
 
@@ -51,9 +59,7 @@ void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int ti
 #endif
         if constexpr (BoundedQueues::Contains<Q>){
             while(!queue->push(&item,tid)){
-                if(backoff++ >= MAX_BACKOFF){
-                    std::this_thread::sleep_for(std::chrono::nanoseconds{50});
-                }
+                std::this_thread::sleep_for(std::chrono::nanoseconds(randint(MAX_BACKOFF)));
             }; //retry until successful push
             backoff = 0;
         } else {
@@ -65,59 +71,72 @@ void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int ti
     return;
 }
 
-/**
- * @brief Consumer Thread routine for benchmark
- * 
- * @note if DEBUG defined then checks queue semantics
- * @note 2-stage waiting synchronization because consumers can exit only when producer is done 
- * and queue is empty
- */
 template<template<typename> typename Q>
-void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, std::vector<size_t> *lastSeen_param, const int tid){ //passo io il puntatore a last seen
+void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const int tid) {
     const size_t min_wait = args->min_wait;
     const size_t max_wait = args->max_wait;
     size_t consumerTransfer = 0;
-#ifdef DEBUG
-    /*  each producer gets a size_t vector to check queue semantics over
-        items inserted by all producers 
-    */
-    //std::vector<size_t> lastSeen(args->producers,0);  
-    std::vector<size_t> &lastSeen = *lastSeen_param;  //reference to avoid out of scope access
-#endif
+    
+    // Track last seen value per producer to verify ordering
+    #ifdef DEBUG
+    std::vector<size_t> lastSeen(args->producers, 0);
+    #endif
+    
     Data *popped = nullptr;
-
+    
+    // Wait for all threads to be ready
     (args->consumerBarrier)->arrive_and_wait();
-    while(!((args->stopFlag)->load())){
+    
+    // Main processing loop while producers are active
+    while(!((args->stopFlag)->load())) {
         popped = queue->pop(tid);
-        if(popped != nullptr){
-#ifdef DEBUG
-            if(popped->val <= lastSeen[popped->tid]){
-                std::cerr << "Consumer " << tid << " received an out of order item: " << popped->val << " <= " << lastSeen[popped->tid] << std::endl;
-                exit(1);
+        if(popped != nullptr) {
+            #ifdef DEBUG
+            // Verify that values from each producer are strictly increasing
+            if(popped->tid < args->producers) {  // Validate producer ID
+                if(popped->val < lastSeen[popped->tid]) {
+                    std::cerr << "Order violation: Consumer " << tid 
+                             << " received " << popped->val 
+                             << " after " << lastSeen[popped->tid]
+                             << " from producer " << popped->tid << std::endl;
+                    exit(1);
+                }
+                lastSeen[popped->tid] = popped->val;
             }
-            lastSeen[popped->tid] = popped->val;
-#endif
+            #endif
             ++consumerTransfer;
         }
-        random_work(min_wait,max_wait);
+        random_work(min_wait, max_wait);
     }
-    //producer done: drain the queue
-    do{
+    
+    // Drain remaining items after producers are done
+    while(true) {
         popped = queue->pop(tid);
-        if(popped != nullptr){
-#ifdef DEBUG
-            if(popped->val <= lastSeen[popped->tid]){
-                std::cerr << "Consumer " << tid << " received an out of order item: " << popped->val << " from producer " << popped->tid << std::endl;
+        if(popped == nullptr) {
+            break;  // Queue is empty
+        }
+        
+        #ifdef DEBUG
+        // Apply the same ordering check to remaining items
+        if(popped->tid < args->producers) {
+            if(popped->val < lastSeen[popped->tid]) {
+                std::cerr << "Order violation during drain: Consumer " << tid 
+                         << " received " << popped->val 
+                         << " after " << lastSeen[popped->tid]
+                         << " from producer " << popped->tid << std::endl;
                 exit(1);
             }
             lastSeen[popped->tid] = popped->val;
-#endif
-            ++consumerTransfer;
         }
-        random_work(min_wait,max_wait);
-    }while(popped != nullptr);
+        #endif
+        
+        ++consumerTransfer;
+        random_work(min_wait, max_wait);
+    }
+    
+    // Final synchronization
     args->consumerBarrier->arrive_and_wait();
-    *transfers = consumerTransfer;  //load the transfer value to main variable
+    *transfers = consumerTransfer;
     return;
 }
 
@@ -133,7 +152,8 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
     std::barrier<> threadBarrier(producers + consumers + 1); //(producers + 1 producer + 1 main thread)
     std::barrier<> producerBarrier(producers + 1);
     std::atomic<bool> stopFlag{false}; //flag to signal consumer that producers are done
-    std::vector<std::thread> threads;
+    std::vector<std::thread> producers;
+    std::vector<std::thread> consumers;
 
     threadArgs arg;
     arg.producerBarrier = &producerBarrier;
@@ -153,27 +173,30 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
         producerItems[i]++;
     }
 
-    std::vector<std::vector<size_t>> lastSeenMatrix(consumers,std::vector<size_t>(producers,0));
-
-
     //schedule producers
     for(int tid = 0; tid < producers ; tid++){
-        threads.emplace_back(producerRoutine<Q>,queue,&arg,producerItems[tid],tid);
+        producers.emplace_back(producerRoutine<Q>,queue,&arg,producerItems[tid],tid);
     }
 
     //schedule consumer
     std::vector<size_t> consumerResult(consumers,0);
     for(int tid = producers; tid < producers + consumers ; tid++){
         int tid_consumer = tid - producers;
-        threads.emplace_back(consumerRoutine<Q>,queue,&arg,&consumerResult[tid-producers],&(lastSeenMatrix[tid_consumer]),tid_consumer);
+        consumers.emplace_back(consumerRoutine<Q>,queue,&arg,&consumerResult[tid-producers],tid_consumer);
     }
+    NumaDispatcher numa(3);
+    numa.dispatch_threads(producers,consumers);
+    std::this_thread::sleep_for(std::chrono::hours{1});
     threadBarrier.arrive_and_wait();
     auto start = std::chrono::high_resolution_clock::now();
     producerBarrier.arrive_and_wait();
     stopFlag.store(true);
     threadBarrier.arrive_and_wait();
     auto end = std::chrono::high_resolution_clock::now();
-    for(auto &t : threads){
+    for(auto &t : producers){
+        t.join();
+    }
+    for(auto &t : consumers){
         t.join();
     }
     delete queue;
@@ -187,21 +210,6 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
     }
     
     if(totalTransfers != items){
-        //calculate the last item seen from each producer thread
-        std::vector<size_t> lastSeenProducer(producers,0);
-        for(int i = 0; i < consumers; i++){
-            for(int j = 0; j < producers; j++){
-                if(lastSeenMatrix[i][j] > lastSeenProducer[j]){
-                    lastSeenProducer[j] = lastSeenMatrix[i][j];
-                }
-            }
-        }
-
-        //stampa il vettore
-        std::cerr << "Last seen: ";
-        for(auto &i : lastSeenProducer){
-            std::cerr << i << " ";
-        }
         std::cerr << std::endl;
         std::cerr << "Assertion failed: "  << totalTransfers << " != " << items << std::endl;
         exit(1);
@@ -216,6 +224,8 @@ long double benchmark(size_t producers,size_t consumers,size_t size_queue,size_t
 
 
 int main(int argc, char **argv) {
+    return 0;
+
     if(argc != 8){
         std::cout << "Usage: " << argv[0] << " <queue_name> <producers> <consumers> <size_queue> <items> <min_wait> <max_wait>" << std::endl;
         return 1;

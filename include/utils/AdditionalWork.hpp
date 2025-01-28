@@ -37,3 +37,8 @@ inline __attribute__((used,always_inline)) void random_work(size_t inf,size_t su
     std::uniform_int_distribution<int> dis(inf, sup); // Distribution between min and max
     loop(dis(random_engine));   //call loop function (shoudn't get optimized);
 }
+
+inline __attribute__((used,always_inline)) uint64_t randint(uint64_t max){
+    std::uniform_int_distribution<uint64_t> dis(0, max); // Distribution between 0 and max
+    return dis(random_engine);
+}

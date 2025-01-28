@@ -21,7 +21,7 @@ public:
      * @param size_par (size_t) sizeRing of the queue
      * @param tid (int) thread id [not used]
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      * @note uses a std::deque as the underlying data structure
      */
     MuxQueue(size_t size_par, [[maybe_unused]] const int tid = 0):sizeRing{size_par}{};
@@ -55,7 +55,7 @@ public:
      * 
      * @returns (bool) true if the operation is successful
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      * @note uses a std::lock_guard to ensure mutual exclusion
      */
     __attribute__((used,always_inline)) bool push(T* item,[[maybe_unused]] const int tid = 0){
@@ -74,7 +74,7 @@ public:
      * 
      * @returns (T*) item popped from the queue [nullptr if the queue is empty]
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
      * @note uses a std::lock_guard to ensure mutual exclusion
      */
     __attribute__((used,always_inline)) T* pop([[maybe_unused]] const int tid = 0){

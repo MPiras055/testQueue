@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>  // For alignas
+#include <cassert>  //for assert
 
 #ifndef CACHE_LINE
 #define CACHE_LINE 64
@@ -58,6 +59,5 @@ template<class T>
 struct PlainCell<T,false>{
     std::atomic<T>          val;
 };
-
 
 }

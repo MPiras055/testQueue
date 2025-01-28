@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstddef>
 /**
  * Superclass for queue segments
  */
@@ -11,19 +12,21 @@ public:
     alignas(CACHE_LINE) std::atomic<uint64_t> tail{0};
     alignas(CACHE_LINE) std::atomic<Segment*> next{nullptr};
 
-
-
     /**
      * @brief get the index given the tail [ignores the MSB]
      * 
      * @note the MSB is used to signal a closed segment in segment implementation
      */
-    static inline uint64_t tailIndex(uint64_t tail) {return (tail & ~(1ull << 63));}
+    inline uint64_t tailIndex(uint64_t t) const {
+        return (t & ~(1ull << 63));
+    }
 
     /**
      * @brief check if the current segment is closed
      */
-    static inline bool isClosed(uint64_t tail) {return (tail & (1ull<<63)) != 0;}
+    inline bool isClosed(uint64_t t) const {
+        return (t & (1ull << 63)) != 0;
+    }
 
     /**
      * @brief sets the starting index given a new segment
@@ -42,14 +45,14 @@ public:
      * @note some segments [FAA] perform fetch and add operations regardless of the current state of tail and head
      * @note it can happen that head gets bigger than tail [i.e case of unbalanced load of consumers]
      */
-    void fixState() {
-        while(true) {
+    inline void fixState() {
+        while (true) {
             uint64_t t = tail.load();
             uint64_t h = head.load();
-            if(tail.load() != t) continue;
-            if(h>t) {
+            if (tail.load() != t) continue;
+            if (h > t) { // h would be less than t if queue is closed
                 uint64_t tmp = t;
-                if(tail.compare_exchange_strong(tmp,h))
+                if (tail.compare_exchange_strong(tmp, h))
                     break;
                 continue;
             }
@@ -74,44 +77,51 @@ public:
      * @warning this function should only use standard C++ synchronization primitives
      * 
      */
-    inline bool closeSegment(const uint64_t tailTicket) {
-        uint64_t tmp = tailTicket + 1;  //accounts for fetch add operation
-        return tail.compare_exchange_strong(tmp,(tailTicket + 1) | (1ull << 63));
+    inline bool closeSegment(const uint64_t tailticket,bool force) {
+        if(force){
+            return isClosed(tail.fetch_or(1ull << 63));
+        }
+        else{
+            uint64_t tmp = tailticket + 1;
+            return tail.compare_exchange_strong(tmp, (tailticket + 1) | (1ull<<63));
+        }
     }
 
     /**
-     * @brief set the closed bit of a segment from outsinde
+     * @brief set the closed bit of a segment 
      * @note calls bool closeSegment(const uint64_t)
      */
-    inline bool closeSegment() {
-        return closeSegment(tail.load()-1); //minus one to not accout for the fetch-add operation
+    inline bool closeSegment(bool force) {
+        return closeSegment(tail.load()-1,force); //minus one to not accout for the fetch-add operation
     }
 
     /**
      * @brief checks if the current semgnet is empty is empty
      */
     inline bool isEmpty() const {
-        return head.load() >= tailIndex(tail.load());
+        uint64_t h = head.load();
+        uint64_t t = tailIndex(tail.load());
+        return h >= t;
     }
 
     /**
      * @brief getter for head index
      */
-    inline uint64_t getHeadIndex() const { 
-        return (head.load()); 
+    inline uint64_t getHeadIndex() {
+        return head.load();
     }
 
     /**
      * @brief getter for the tail index
      */
-    inline uint64_t getTailIndex() const {
+    inline uint64_t getTailIndex() {
         return tailIndex(tail.load());
     }
 
     /**
      * @brief get the start index of the next segment
      */
-    inline uint64_t getNextSegmentStartIndex() const { 
+    inline uint64_t getNextSegmentStartIndex() {
         return getTailIndex() - 1;
     }
 };

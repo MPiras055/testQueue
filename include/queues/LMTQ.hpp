@@ -1,14 +1,12 @@
 #pragma once
 
-#include <atomic>
-#include "LinkedRingQueue.hpp"
+#include "LinkedAdapter.hpp"
 #include "RQCell.hpp"
-#include "x86Atomics.hpp"
-#include "AdditionalWork.hpp"   //for loop function
+#include "CacheRemap.hpp"
 
-
-#define BACKOFF_MIN 128UL //should be a power of 2
-#define BACKOFF_MAX 1024UL //should be a power of 2
+#ifndef TRY_CLOSE_MTQ
+#define TRY_CLOSE_MTQ 10
+#endif
 
 template <typename T,bool padded_cells, bool bounded>
 class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
@@ -18,6 +16,7 @@ private:
 
     Cell *array;
     const size_t sizeRing;
+    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
 #ifndef DISABLE_POW2
     const size_t mask;  //Mask to execute the modulo operation
 #endif
@@ -30,28 +29,28 @@ private:
      * @param tid (int) thread id [not used]
      * @param start (uint64_t) start index of the segment [useful for LinkedRing Adaptation]
      * 
-     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
      * @exception std::invalid_argument if the size is 0
      */
-    MTQueue(size_t size_param,[[maybe_unused]] const int tid, uint64_t start): 
-    Base(),
+    MTQueue(size_t size_par,[[maybe_unused]] const int tid, uint64_t start): Base(), 
 #ifndef DISABLE_POW2
-    sizeRing{detail::nextPowTwo(size_param)},
-    mask{sizeRing - 1}
+    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
+    mask{sizeRing - 1},  //sets the mask to perform modulo operation
 #else
-    size{size_param}
+    sizeRing{size_par},
 #endif
+    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(sizeRing)) //initialize the cache remap
     {
-        if(sizeRing == 0)
-            throw std::invalid_argument("Ring Size must be greater than 0");
         array = new Cell[sizeRing];
-        for (uint64_t i = start; i < start + sizeRing; i++){
-            array[i % sizeRing].val.store(nullptr,std::memory_order_relaxed);
-            array[i % sizeRing].idx.store(i,std::memory_order_relaxed);
 
-            Base::head.store(start,std::memory_order_relaxed);
-            Base::tail.store(start,std::memory_order_relaxed);
+        //sets the fields of the Cell given the startingIndex (default 0)
+        for(uint64_t i = start; i < start + sizeRing; ++i){
+            array[remap[i % sizeRing]].val.store(nullptr,std::memory_order_relaxed);
+            array[remap[i % sizeRing]].idx.store(i,std::memory_order_relaxed);           
         }
+
+        Base::head.store(start,std::memory_order_relaxed);
+        Base::tail.store(start,std::memory_order_relaxed);
     }
 
 
@@ -62,7 +61,7 @@ public:
      * @param size (size_t) size of the segment
      * @param tid (int) thread id [not used]
      * 
-     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedRingQueue
+     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
      * @note calls the private constructor with start index set to 0
      */
     MTQueue(size_t size,[[maybe_unused]] const int tid = 0): MTQueue(size,tid,0){} 
@@ -88,9 +87,9 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) bool push(T *item,[[maybe_unused]] const int tid){
+        int try_close = 0;
         size_t tailTicket,idx;
         Cell *node;
-        size_t bk = BACKOFF_MIN;
         while(true){
             tailTicket = Base::tail.load(std::memory_order_relaxed);
             if constexpr (!bounded){ //check if queue is closed if unbounded
@@ -99,17 +98,14 @@ public:
                 } 
             }
 #ifndef DISABLE_POW2
-            node = &(array[tailTicket & mask]);
+            node = &(array[remap[tailTicket & mask]]);
 #else
-            node = &(array[tailTicket % size]);
+            node = &(array[remap[tailTicket % size]]);
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             if(tailTicket == idx){
                 if(Base::tail.compare_exchange_weak(tailTicket,tailTicket + 1,std::memory_order_relaxed)) //try to advance the index
                     break;
-                loop(bk);   //loop function that shoudnt be optimized out
-                bk <<= 1;
-                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;
             } else {
                 if(tailTicket > idx){
                     if constexpr (bounded){ //if queue is bounded then never closes the segment
@@ -120,7 +116,7 @@ public:
                             The Base::closeSegment function is designed to close segments for fetch_add queues
                             to compensate we use tailTicket - 1 to close the current segment
                         */
-                        if (Base::closeSegment(tailTicket-1)){
+                        if (Base::closeSegment(tailTicket-1,try_close++ < TRY_CLOSE_MTQ)){
                             return false;
                         }
                     }
@@ -143,24 +139,20 @@ public:
     __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid){
         size_t headTicket,idx;
         Cell *node;
-        size_t bk = BACKOFF_MIN;
         T* item;    //item to return;
 
         while(true){
             headTicket = Base::head.load(std::memory_order_relaxed);
 #ifndef DISABLE_POW2
-            node = &array[headTicket & mask];
+            node = &(array[remap[headTicket & mask]]);
 #else
-            node = &array[headTicket % size];
+            node = &(array[remap[headTicket % size]]);
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             long diff = idx - (headTicket + 1);
             if(diff == 0){
                 if(Base::head.compare_exchange_weak(headTicket,headTicket + 1,std::memory_order_relaxed)) //try to advance the head
                     break;
-                loop (bk);  //loop function that shoudnt be optimized out
-                bk <<= 1;
-                bk = ((bk-1) & (BACKOFF_MAX-1)) + 1;
             }
             else if (diff < 0){ //check if queue is empty
                 if(Base::isEmpty())
@@ -203,17 +195,17 @@ public:
     }
 
 
-    friend class LinkedRingQueue<T,MTQueue<T,padded_cells,bounded>>;   
+    friend class LinkedAdapter<T,MTQueue<T,padded_cells,bounded>>;   
 
 };
 
 template<typename T>
 #ifndef DISABLE_PADDING
-using LMTQueue = LinkedRingQueue<T,MTQueue<T,true,false>>;
+using LMTQueue = LinkedAdapter<T,MTQueue<T,true,false>>;
 template<typename T>
 using BoundedMTQueue = MTQueue<T,true,true>;
 #else 
-using LMTQueue = LinkedRingQueue<T,MTQueue<T,false,false>>;
+using LMTQueue = LinkedAdapter<T,MTQueue<T,false,false>>;
 template <typename T>
 using BoundedMTQueue = MTQueue<T,false,true>;
 #endif
