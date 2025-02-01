@@ -1,6 +1,13 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
+#include "x86Atomics.hpp"
+#include <thread>
+#include <chrono>
+
+#ifndef CLUSTER_WAIT
+#define CLUSTER_WAIT 100ull //microseconds
+#endif
 /**
  * Superclass for queue segments
  */
@@ -11,6 +18,37 @@ public:
     alignas(CACHE_LINE) std::atomic<uint64_t> head{0};
     alignas(CACHE_LINE) std::atomic<uint64_t> tail{0};
     alignas(CACHE_LINE) std::atomic<Segment*> next{nullptr};
+    alignas(CACHE_LINE) std::atomic<int> cluster{0};    //initializes the cluster to 0
+
+    /***
+     * @brief waits for the current thread to be on the same cluster as the segment
+     * 
+     * @param threadCluster (int) the cluster where the thread is executing
+     * 
+     * The function consists of several microsleeps for the thread to wait while checking 
+     * if the current segment cluster is the same as its cluster. If `MAX_SPINS` is reached
+     * then the thread tries to change the current cluster [doesn't check fails - guarantees forward progress]
+     * before exiting
+     * 
+     * @warning this function is useful only when the threads are pinned to a specific CPU [or Numa Node]
+     */
+    __attribute__((always_inline,used)) inline void waitOnCluster(int threadCluster){
+#ifndef DISABLE_AFFINITY
+        constexpr uint MAX_SPINS = 100;
+        constexpr uint sleep = CLUSTER_WAIT/MAX_SPINS;
+
+        int c = cluster.load(std::memory_order_acquire);
+        uint64_t sleepCycles = 0;
+        while(sleepCycles++ < MAX_SPINS){
+            if(c == threadCluster) return;  //someone else already setted the thread cluster
+            std::this_thread::sleep_for(std::chrono::microseconds(sleep));
+            c = cluster.load(std::memory_order_acquire);    //reload the current cluster
+        }
+        cluster.compare_exchange_strong(c,threadCluster,std::memory_order_release); 
+#endif  
+        return;
+    }
+
 
     /**
      * @brief get the index given the tail [ignores the MSB]
@@ -49,7 +87,7 @@ public:
         while (true) {
             uint64_t t = tail.load();
             uint64_t h = head.load();
-            if (tail.load() != t) continue;
+            if (tail.load() != t) continue; //inconsistent tail
             if (h > t) { // h would be less than t if queue is closed
                 uint64_t tmp = t;
                 if (tail.compare_exchange_strong(tmp, h))
@@ -79,11 +117,12 @@ public:
      */
     inline bool closeSegment(const uint64_t tailticket,bool force) {
         if(force){
-            return isClosed(tail.fetch_or(1ull << 63));
+            tail.fetch_or(1ull << 63);
+            return true;
         }
         else{
             uint64_t tmp = tailticket + 1;
-            return tail.compare_exchange_strong(tmp, (tailticket + 1) | (1ull<<63));
+            return tail.compare_exchange_strong(tmp, tmp | 1ull<<63);
         }
     }
 
