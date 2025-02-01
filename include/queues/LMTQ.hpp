@@ -3,6 +3,7 @@
 #include "LinkedAdapter.hpp"
 #include "RQCell.hpp"
 #include "CacheRemap.hpp"
+#include "NumaDispatcher.hpp"
 
 #ifndef TRY_CLOSE_MTQ
 #define TRY_CLOSE_MTQ 10
@@ -13,6 +14,8 @@ class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
 private:
     using Base = QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>;
     using Cell = detail::CRQCell<T*,padded_cells>;
+
+    static inline thread_local int threadCluster = 0;
 
     Cell *array;
     const size_t sizeRing;
@@ -87,6 +90,13 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) bool push(T *item,[[maybe_unused]] const int tid){
+        if constexpr (!bounded){
+            //try to optimize for numa architecture
+            //the functions only executes if AFFINITY is not disabled
+            Base::waitOnCluster(threadCluster);
+        }
+
+
         int try_close = 0;
         size_t tailTicket,idx;
         Cell *node;
@@ -100,7 +110,7 @@ public:
 #ifndef DISABLE_POW2
             node = &(array[remap[tailTicket & mask]]);
 #else
-            node = &(array[remap[tailTicket % size]]);
+            node = &(array[remap[tailTicket % sizeRing]]);
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             if(tailTicket == idx){
@@ -137,6 +147,11 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid){
+        if constexpr (!bounded){
+            //try to optimize for numa architecture
+            //the functions only executes if AFFINITY is not disabled
+            Base::waitOnCluster(threadCluster);
+        }
         size_t headTicket,idx;
         Cell *node;
         T* item;    //item to return;
@@ -146,7 +161,7 @@ public:
 #ifndef DISABLE_POW2
             node = &(array[remap[headTicket & mask]]);
 #else
-            node = &(array[remap[headTicket % size]]);
+            node = &(array[remap[headTicket % sizeRing]]);
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             long diff = idx - (headTicket + 1);

@@ -37,7 +37,7 @@ public:
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
 #endif
-        Segment* sentinel = new Segment(sizeRing);
+        Segment* sentinel = new Segment(sizeRing,maxThreads,0);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
     }
@@ -78,17 +78,19 @@ public:
             Segment *lnext = ltail->next.load();
             //advance the global head
             if (lnext != nullptr) {
-                (tail.compare_exchange_strong(ltail, lnext))?
-                    ltail = HP.protect(kHpTail, lnext, tid)
-                :
+                if(tail.compare_exchange_strong(ltail, lnext)){
+                    ltail = HP.protect(kHpTail, lnext, tid);
+                }
+                else {
                     ltail = HP.protect(kHpTail, tail.load(), tid);
+                }
                 continue;
             }
 
             //try to push on the current segment
             if (ltail->push(item, tid)) {
                 HP.clear(kHpTail, tid);
-                break;
+                return;
             }
 
             //if push failed then the segment has been closed so try to create a new segment
@@ -101,7 +103,7 @@ public:
             if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
                 tail.compare_exchange_strong(ltail, newTail);   //try to globally set the new tail [not guaranteed]
                 HP.clear(kHpTail, tid);
-                break;
+                return;
             } else { 
                 delete newTail;
             }
@@ -136,7 +138,6 @@ public:
             //try to pop from the current segment
             item = lhead->pop(tid);
             if (item == nullptr){
-
                 Segment* lnext = lhead->next.load();
                 if (lnext != nullptr){
                     item = lhead->pop(tid);
