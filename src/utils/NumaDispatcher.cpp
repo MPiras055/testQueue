@@ -8,6 +8,8 @@
 #include <numa.h>
 #include <iostream>
 #include <cmath>
+#include <sched.h>
+
 
 void NumaDispatcher::save_core_map(std::string file){
     std::ofstream out(file);
@@ -176,10 +178,7 @@ NumaDispatcher::NumaDispatcher(uint cache_level, bool try_load){
     for( int i = 0; i <= max_node; i++){
         core_map[i].cluster_id = i;
     }
-    //map all physical cores
-    for(int i : physical_cores)
-        std::cout << i << "\n"; 
-
+    
 
     for(int i = 0; i < physical_cores.size(); i++){
         int node_of_i = numa_node_of_cpu(physical_cores[i]);
@@ -202,7 +201,7 @@ NumaDispatcher::NumaDispatcher(uint cache_level, bool try_load){
         c.sort_cache_topology(cache_level);
     }
 
-    save_core_map(core_map_file);
+    //save_core_map(core_map_file);
 }
 
 //doesn't require cleanup
@@ -231,64 +230,59 @@ void NumaDispatcher::dispatch_threads(const std::vector<std::thread>& threads){
 void NumaDispatcher::dispatch_threads(const std::vector<std::thread>& group1, std::vector<std::thread>& group2) {
     int g1_size = group1.size();
     int g2_size = group2.size();
-    
-    // If either group is empty, handle the non-empty group normally
-    if (g1_size == 0 || g2_size == 0) {
-        if (g1_size > 0) {
-            dispatch_threads(group1);
-        } else if (g2_size > 0) {
-            dispatch_threads(group2);
-        }
+
+    // If either group is empty, dispatch the other group only
+    if (g1_size == 0) {
+        dispatch_threads(group2);
+        return;
+    }
+    if (g2_size == 0) {
+        dispatch_threads(group1);
         return;
     }
 
-    // Calculate ratio between groups to determine distribution
-    float ratio = static_cast<float>(g1_size) / g2_size;
-    int g1_batch = std::ceil(ratio);
-    int g2_batch = 1;
-    
-    // If ratio is less than 1, invert it
-    if (ratio < 1.0f) {
-        ratio = 1.0f / ratio;
-        g1_batch = 1;
-        g2_batch = std::ceil(ratio);
-    }
+    // Calculate the thread dispatch ratio
+    const int gcd = std::gcd(g1_size, g2_size);
+    const int g1_batch = g1_size / gcd;
+    const int g2_batch = g2_size / gcd;
 
-    int g1_idx = 0;
-    int g2_idx = 0;
-    bool first_pass = true;
+    int g1_idx = 0,g2_idx = 0;
+    int g1_batch_idx = 0,g2_batch_idx = 0;
+
+    bool which_batch = false;
+    bool use_physical_cores = true;
 
     while (g1_idx < g1_size || g2_idx < g2_size) {
-        // First pass: use physical cores
-        // Second pass: use hyperthreading cores
-        for (NumaCluster &cluster : core_map) {
-            const std::vector<int>& cores = first_pass ? cluster.core_ids : cluster.ht_core_ids;
-            
-            for (int core_id : cores) {
-                // Dispatch group1 threads according to ratio
-                for (int i = 0; i < g1_batch && g1_idx < g1_size; i++) {
-                    bind_thread_to_core(const_cast<std::thread&>(group1[g1_idx]), core_id);
-                    g1_idx++;
+        for(int iCluster = 0; iCluster < core_map.size() ; iCluster++){
+            NumaCluster &c = core_map[iCluster];
+            std::vector<int> cores = use_physical_cores ? c.core_ids : c.ht_core_ids;
+            size_t cores_size = cores.size();
+            size_t iCore = 0;
+            while(iCore < cores_size && (g1_idx < g1_size || g2_idx < g2_size)){    //no ping pong the while exits if both groups are done
+                //schedule batch from first group
+                if(which_batch){
+                    if(g2_batch_idx++ >= g2_batch || g2_idx >= g2_size){ //if batch is done or index out of range
+                        which_batch = !which_batch; //flip group
+                        g2_batch_idx = 0;
+                    } else {
+                        bind_thread_to_core(const_cast<std::thread&>(group2[g2_idx++]),cores[iCore++]); //increment core cout only when scheduling
+                    }
+                } else {
+                    if(g1_batch_idx++ >= g1_batch || g1_idx >= g1_size){ //flip to other group
+                        which_batch = !which_batch; //flip group
+                        g1_batch_idx = 0;   //reset other batch index
+                    } else {
+                        bind_thread_to_core(const_cast<std::thread&>(group1[g1_idx++]),cores[iCore++]);
+                    }
                 }
-                
-                // Dispatch group2 threads according to ratio
-                for (int i = 0; i < g2_batch && g2_idx < g2_size; i++) {
-                    bind_thread_to_core(group2[g2_idx], core_id);
-                    g2_idx++;
-                }
+
             }
+
+            if(g1_idx >= g1_size && g2_idx >= g2_size)  //if both finished then return
+                return;
         }
-        
-        // If we haven't placed all threads after using physical cores,
-        // switch to hyperthreading cores
-        if (first_pass && (g1_idx < g1_size || g2_idx < g2_size)) {
-            first_pass = false;
-        }
-        // If we've used both physical and HT cores and still have threads,
-        // start over with physical cores (will cause context switching)
-        else if (!first_pass && (g1_idx < g1_size || g2_idx < g2_size)) {
-            first_pass = true;
-        }
+
+        use_physical_cores = !use_physical_cores; //flip to hyperthreading cores || bac kto physical if necessary
     }
 }
 

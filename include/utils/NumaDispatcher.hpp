@@ -31,7 +31,7 @@ private:
     bool load_core_map(std::string);
 
 public:
-    NumaDispatcher(uint cache_level, bool try_load = true);
+    NumaDispatcher(uint cache_level, bool try_load = false);
         //prova a caricare la mappa dei core
         //se la trova allora termina
         //altrimenti inizializza la topologia
@@ -47,5 +47,17 @@ public:
     //dispatches threads from each group considering their ratio
     void dispatch_threads(const std::vector<std::thread>&, std::vector<std::thread>&);
     void print_core_map();
+
+    /**
+     * public methods used to access cpu and numa node information
+     */
+    inline static int get_core(){
+        return sched_getcpu();
+    }
+
+    inline static int get_numa_node(){
+        const int cpu = sched_getcpu();
+        return cpu >= 0 ? numa_node_of_cpu(cpu) : -1;
+    }
     
 };
