@@ -1,213 +1,413 @@
-#include <iostream>
 #include <string>
-#include <chrono>
+#include <vector>
+#include <iostream>
 #include <barrier>
-#include <thread>
+#include <chrono>
+#include <type_traits>
+#include <optional>
 #include "QueueTypeSet.hpp"
+#include "NumaDispatcher.hpp"
 #include "AdditionalWork.hpp"
-#include "ThreadStruct.hpp"
 
-//#define DEBUG 0
+#define PRINT_CLUSTER false //debugging
+//#define DEBUG 0 //[uncomment to check queue correctness]
+//#define DISABLE_AFFINITY 0 // [uncomment to disable affinity]
+
+#ifdef DEBUG
+#include <cassert>
+#endif
+
+//Parameters for exponential delay
+#define MIN_BACKOFF     2048ull //~250ns
+#define MAX_BACKOFF     32768ull //~4us
+/**
+ * On low contention enviroment a push/pop operation can last 500ns
+ */
+
+#define CACHE_LEVEL     3
+#define NSEC_IN_SEC     1'000'000'000ull
+
+struct Data {
+    int tid;
+    size_t value;
+    Data() = default;
+    Data(int tid,size_t val): tid(tid), value(val){};
+    void set(int tid_p,size_t val_p){
+        tid = tid_p;
+        value = val_p;
+    }
+    auto operator <=> (const Data&) const = default;
+};
 
 /**
- * @brief Producer Thread routine for benchmark
+ * The struct holds all the shared arguments between threads
  * 
- * @note if DEBUG defined then checks queue semantics: allocs all items to push
- * in a RESERVED SPACE vector (so that it doesnt get reallocated)
- * 
- * @note double barrier wait at the end, because the vector can get out of scope
- * only when consumers are done using it. Otherwise: invalid access
+ * @note we use 2 std::vector (matrices) when debug is defined to check the correctness of the queue
+ * @note the vectors will be passed as references
+ * @note all arguments are passed as references
+ */
+struct threadShared {
+    size_t producers;
+    size_t consumers;
+    size_t items;
+    std::barrier<>* threadsBarrier = nullptr;                  //all threads + main
+    std::barrier<>* producersBarrier = nullptr;                //only producers + main
+    std::barrier<>* consumersBarrier = nullptr;                //only consumers + main
+    std::vector<std::vector<Data>> *itemsPerProducer = nullptr; //only used if DEBUG is defined
+    std::vector<uint64_t> *itemsPerConsumer = nullptr; //only used if DEBUG is defined
+    std::atomic<bool> *stopFlag = nullptr;                //used by consumers [setted by main]
+    std::vector<int>  *threadCluster = nullptr;            //only used if DEBUG is defined and affinity is enabled
+    //parameters for random work
+    size_t center;
+    size_t amplitude;
+    threadShared() = default;
+};
+
+/**
+ * We use a void * so we can either pach an std::vector ptr or an integer
  */
 template<template<typename> typename Q>
-void producerRoutine(Q<Data> *queue, threadArgs *args, size_t data, const int tid){
-    const size_t min_wait = args->min_wait;
-    const size_t max_wait = args->max_wait;
-#ifndef DEBUG
-    Data item(tid,0);
-#else
-    Data item;
-    std::vector<Data> items(data);
-    //Initialize array so that it doesnt get reallocated
-    for(size_t i = 0; i<data ; i++){  
-        items[i].tid = tid;
-        items[i].val = i+1;
-    }
-#endif
-    (args->consumerBarrier)->arrive_and_wait(); //this is all_threads Barrier
-    for(size_t i = 0; i < data; i++){
-#ifdef DEBUG
-        //reference necessary to avoid out of scope access
-        Data &item = items[i];  
-#endif
-        bool res;
-        if constexpr (BoundedQueues::Contains<Q>){
-            res = queue->push(&item,tid);
-            if(!res){
-                --i;    //try new iteration (do random_work before)
-            }
-        } else {
-            queue->push(&item,tid);
-        }
-        random_work(min_wait,max_wait);
-    }
-    (args->producerBarrier)->arrive_and_wait();
-    (args->consumerBarrier)->arrive_and_wait();
-    return;
-}
-
-/**
- * @brief Consumer Thread routine for benchmark
- * 
- * @note if DEBUG defined then checks queue semantics
- * @note 2-stage waiting synchronization because consumers can exit only when producer is done 
- * and queue is empty
- */
+void producer_routine(Q<Data> &queue, size_t items, threadShared &sharedArgs, const int tid);
 template<template<typename> typename Q>
-void consumerRoutine(Q<Data> *queue, threadArgs *args, size_t *transfers, const int tid){
-    const size_t min_wait = args->min_wait;
-    const size_t max_wait = args->max_wait;
-    size_t consumerTransfer = 0;
-#ifdef DEBUG
-    /**
-     * Each consumer gets a vector od size_t to check queue semantics over items inserted by the producers
-     */
-    std::vector<size_t> lastSeen(args->producers,0); 
-#endif
-    Data *popped = nullptr;
+void consumer_routine(Q<Data> &queue, threadShared &sharedArgs, const int tid);
+template<template<typename> typename Q>
+long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude);
 
-    (args->consumerBarrier)->arrive_and_wait();
-    while(!((args->stopFlag)->load())){
-        popped = queue->pop(tid);
-        if(popped != nullptr){
-#ifdef DEBUG
-            if(popped->val <= lastSeen[popped->tid]){
-                std::cerr << "Consumer " << tid << " received an out of order item: " << popped->val << " <= " << lastSeen[popped->tid] << std::endl;
-                exit(1);
-            }
-            lastSeen[popped->tid] = popped->val;
-#endif
-            ++consumerTransfer;
-        }
-        //random_work(min_wait,max_wait);
-    }
-    //Queue draining
-    do{
-        popped = queue->pop(tid);
-        if(popped != nullptr){
-#ifdef DEBUG
-            if(popped->val <= lastSeen[popped->tid]){
-                std::cerr << "Consumer " << tid << " received an out of order item: " << popped->val << " from producer " << popped->tid << std::endl;
-                exit(1);
-            }
-            lastSeen[popped->tid] = popped->val;
-#endif
-            ++consumerTransfer;
-        }
-        random_work(min_wait,max_wait);
-    }while(popped != nullptr);
-    args->consumerBarrier->arrive_and_wait();
-    *transfers = consumerTransfer;
-    return;
-}
 
-/**
- * @brief Benchmark function for a given queue
- * 
- * Counts the number of successful transfer given a time duration
- * 
- */
-template< template <typename> typename Q>
-long double benchmark(size_t producers,size_t size_queue,size_t items,size_t min_wait,size_t max_wait){
-    Q<Data> queue(size_queue, producers + 1);
-    std::barrier<> threadBarrier(producers + 2); // (producers + 1 producer + 1 main thread)
-    std::barrier<> producerBarrier(producers + 1);
-    std::atomic<bool> stopFlag{false}; //flag read by consumer [consumer is done after all producers are done]
-    std::vector<std::thread> threads;
 
-    threadArgs arg;
-    arg.producerBarrier = &producerBarrier;
-    arg.consumerBarrier = &threadBarrier;
-    arg.stopFlag = &stopFlag;
-    arg.min_wait = min_wait;
-    arg.max_wait = max_wait;
-    arg.producers = producers;
-    arg.consumers = 1;
-    arg.numOps = items;
-
-    // [producer load balance]
-    size_t itemPerProducer = items / producers;
-    size_t remaining = items % producers;
-    std::vector<size_t> producerItems(producers,itemPerProducer);
-    for(int i = 0; i< remaining; i++){
-        producerItems[i]++;
-    }
-
-    //schedule producers
-    for(int tid = 0; tid < producers ; tid++)
-        threads.emplace_back(producerRoutine<Q>,&queue,&arg,producerItems[tid],tid);
-
-    //schedule consumer
-    size_t consumerResult = 0;  //Only used in DEBUG mode
-    threads.emplace_back(consumerRoutine<Q>,&queue,&arg,&consumerResult,producers);
-
-    threadBarrier.arrive_and_wait();
-    auto start = std::chrono::high_resolution_clock::now();
-    producerBarrier.arrive_and_wait();
-    stopFlag.store(true);
-    threadBarrier.arrive_and_wait();
-    auto end = std::chrono::high_resolution_clock::now();
-    for(auto &t : threads){
-        t.join();
-    }
-
-#ifdef DEBUG
-    assert(consumerResult == items);    //assert that all items have been correcty dequeued
-#endif
-
-    std::chrono::nanoseconds time = end - start;
-    long double transfPerSec = static_cast<long double>(items * NSEC_IN_SEC) / static_cast<long double>((time).count());
-
-    return transfPerSec;
-}
 
 
 int main(int argc, char **argv) {
-    #ifdef DEBUG
-    puts("DEBUG MODE");
-    #endif
-    if(argc < 7){
-        std::cout << "Usage: " << argv[0] << " <queue_name> <producers> <size_queue> <items> <min_wait> <max_wait>" << std::endl;
+    
+    if(argc == 2){  //Useful to check if a queue name is valid
+        Queues::foreach([&argv]<template <typename> typename Q>() {
+        std::string queueName = Q<int>::className(false);   //the type int is irrelevant
+            if (std::string(argv[1]) == queueName) {
+                exit(0);
+            }
+        });
+        return 1;
+    }
+
+    if(argc != 8){
+        std::cerr << "Usage: " << argv[0] << " <queue_name> <producers> <consumers> <size_queue> <items> <rand_center> <rand_amplitude>" << std::endl;
         return 1;
     }
 
     //refers to the class name of the queue [discarding the /padding suffix if present]
-    std::string name = argv[1];
-    size_t producers = std::stoul(argv[2]);
-    size_t sizeQueue = std::stoul(argv[3]);
-    size_t duration = std::stoul(argv[4]);
-    size_t minWait = std::stoul(argv[5]);
-    size_t maxWait = std::stoul(argv[6]);
-
-    bool found = false;
-    long double result = 0;
+    std::string name    = argv[1];
+    size_t producers    = std::stoul(argv[2]);
+    size_t consumers    = std::stoul(argv[3]);
+    size_t sizeQueue    = std::stoul(argv[4]);
+    size_t duration     = std::stoul(argv[5]);
+    size_t center       = std::stoul(argv[6]);
+    size_t amplitude    = std::stoul(argv[7]);
 
     /**
      * Perform a foreach operation over the Queues template set and benchmark the queue
      * @note Queues defined in QueueTypeSet.hpp
      * @note if the same queue is contained more than once in the set, the benchmark is executed only one time
      */
-    Queues::foreach([&]<template <typename> typename Q>() {
+    Queues::foreach([&]<template <typename> typename Q>() { //captures all the outer scope
         std::string queueName = Q<int>::className(false);   //the type int is irrelevant
-        if (!found && name == queueName) {
-            found = true;
-            result = benchmark<Q>(producers, sizeQueue, duration, minWait, maxWait);
+        if (name == queueName) {
+            std::cout << 
+#ifdef DEBUG
+            "DEBUG: " <<
+#endif
+            benchmark<Q>(producers,consumers, sizeQueue, duration, center, amplitude) << std::endl;
+            exit(0); //exit the program successfully
         }
     });
 
-    if (!found) {
-        std::cout << "Queue not found: " << name << std::endl;
+        std::cerr << "Queue not found: " << name << std::endl;
         return 1;
+}
+
+
+
+
+
+
+template<template<typename> typename Q>
+long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude){
+    if(producers == 0 || consumers == 0 || sizeQueue == 0 || items == 0){
+        std::cerr << "Error: Invalid null arguments" << std::endl;
+        exit(1);
     }
-    std::cout << result << std::endl;
-    return 0;
+
+    //init variables
+    Q<Data> queue = Q<Data>(sizeQueue, producers + consumers); //queue only used by subthreads
+    //init synch primitives
+    std::barrier<> allThreads(producers + consumers + 1); //+1 for main
+    std::barrier<> producersBarrier(producers + 1); //+1 for main
+    std::barrier<> consumersBarrier(consumers + 1); //+1 for main
+    std::atomic<bool> stopFlag(false); //used by consumers to stop the loop
+    threadShared sharedArgs;  //shared arguments between threads
+
+    //initialize the shared arguments
+    sharedArgs.producers = producers;
+    sharedArgs.consumers = consumers;
+    sharedArgs.threadsBarrier = &allThreads;
+    sharedArgs.producersBarrier = &producersBarrier;
+    sharedArgs.consumersBarrier = &consumersBarrier;
+    sharedArgs.stopFlag = &stopFlag;
+    sharedArgs.center = center;
+    sharedArgs.amplitude = amplitude;
+
+
+    //load balance for producers
+    const size_t producerBatch = items / producers;
+    const size_t remainer = items % producers;  //to the first [remainer producers we add 1 item]
+
+#ifdef DEBUG
+    /**
+     * If debug is defined then we preallocate all the items to be sent by the producers
+     * so at the end we can check if the ordering is right and if all items are delivered
+     * 
+     * We also preallocate a storage space for the consumers to save the items, at the end we will
+     * check if all items are received in the right order
+     * 
+     * All items contains a tid_stamp and an incremental value (starting from 0).
+     * 
+     * @note the assignment respect the load balance between producers
+     */
+    std::vector<std::vector<Data>> producersMatrix(producers);
+    std::vector<uint64_t> itemsPerConsumer(consumers,0);
+
+    size_t curr_assignment = 1; //we start from value 1 to insert to value items + 1
+
+    for(int i = 0; i < producers; i++){
+        const size_t size = producerBatch + (i < remainer ? 1 : 0);
+        producersMatrix[i].reserve(size);   //init data as default
+        for(int j = 0; j < size; j++){
+            producersMatrix[i].push_back(Data(i,curr_assignment++));
+        }
+    }
+
+    assert(curr_assignment == items+1); //to accout for the first value
+
+    //set the shared arguments
+    sharedArgs.itemsPerProducer = &(producersMatrix);
+    sharedArgs.itemsPerConsumer = &(itemsPerConsumer);
+#endif
+#ifndef DISABLE_AFFINITY
+    //initialize the threadCluster vector
+    std::vector<int> threadClusterAssignment(producers + consumers,-1);
+    sharedArgs.threadCluster    = &(threadClusterAssignment);
+#endif
+
+    std::vector<std::thread> producer_threads;
+    std::vector<std::thread> consumer_threads;
+
+    //schedule producers
+    int current_tid = 0;
+    while(current_tid < producers){
+        producer_threads.emplace_back( producer_routine<Q>,std::ref(queue), 
+                                        producerBatch + (current_tid < remainer ? 1 : 0), //load balance
+                                        std::ref(sharedArgs),
+                                        current_tid);
+        current_tid++;
+    }
+
+    //schedule consumers
+    while(current_tid < producers + consumers){
+        consumer_threads.emplace_back( consumer_routine<Q>,std::ref(queue),
+                                        std::ref(sharedArgs),
+                                        current_tid);
+        current_tid++;
+    }
+
+    /**
+     * if the numa optimization isn't disabled then we
+     */
+#ifndef DISABLE_AFFINITY
+    NumaDispatcher dispatcher(CACHE_LEVEL);
+    /**
+     * The dispatchment is done prioritizing filling cluster in a fair way between
+     * producers and consumers (ratio based pinning). The threads are also dispatched
+     * in a way to boost shared cache usage.
+     */
+    dispatcher.dispatch_threads(producer_threads,consumer_threads);
+#endif
+
+    //threads are ready
+    allThreads.arrive_and_wait(); //threads wait [if affinity is enabled] for the main to set the affinity
+#ifndef DISABLE_AFFINITY
+    allThreads.arrive_and_wait(); //wait for all threads to have set their cluster field
+    bool clusterSetError = false;
+
+    for(int i = 0; i < threadClusterAssignment.size(); i++){
+        if(threadClusterAssignment[i] < 0){
+            std::cerr << "Cluster Error: Thread " << i << "not assigned. Cluster: " << threadClusterAssignment[i] << "\n";
+            clusterSetError = true; 
+        } else {    //so messages don't overlap
+#ifdef DEBUG
+#if PRINT_CLUSTER
+        std::cout << "Thread " << i << " running on Cluster " << threadClusterAssignment[i] << "\n";
+#endif
+#endif
+        }
+    }
+    std::cout.flush(); //flush output
+    assert(!clusterSetError); //abort if clusterFail
+
+#endif
+    //threads make initializations ...
+    allThreads.arrive_and_wait();
+    //Measuration
+    auto start = std::chrono::high_resolution_clock::now();
+    producersBarrier.arrive_and_wait();
+    //set consumers flag
+    stopFlag.store(true,std::memory_order_release);
+    allThreads.arrive_and_wait(); //wait for all threads to be done
+    auto end = std::chrono::high_resolution_clock::now();
+    for(auto &prod : producer_threads)
+        prod.join();
+    for(auto &cons : consumer_threads)
+        cons.join();
+
+#ifdef DEBUG    //check for correct delivery
+    uint64_t totalTransfers = std::accumulate(itemsPerConsumer.begin(),itemsPerConsumer.end(),0);
+    if(items != totalTransfers){
+        std::cerr << "ERROR: Sent Items " << items << " != " << totalTransfers << " Received Items\n";
+    }
+#endif
+
+    //return the ops per sec
+    std::chrono::nanoseconds deltaTime = end - start;
+    return static_cast<long double>(items * NSEC_IN_SEC) / deltaTime.count();
+}
+
+
+
+
+
+template<template<typename> typename Q>
+void producer_routine(Q<Data> &queue, size_t items, threadShared &sharedArgs, const int tid){
+    sharedArgs.threadsBarrier->arrive_and_wait(); //wait for main to set affinity
+
+#ifndef DISABLE_AFFINITY    //if affinity has been set
+    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    sharedArgs.threadsBarrier->arrive_and_wait();
+#endif
+
+    Data *item;
+#ifdef DEBUG    //get the items to be sent
+    items = (*sharedArgs.itemsPerProducer)[tid].size();
+#else
+    item = new Data();  //no initialization required because it won't be checked
+#endif
+    uint failed = 0;
+    uint64_t delay = MIN_BACKOFF;    //initial delay
+    const size_t center = sharedArgs.center;
+    const size_t amplitude = sharedArgs.amplitude;
+    const size_t producers = sharedArgs.producers;
+    sharedArgs.threadsBarrier->arrive_and_wait();
+    for(size_t i = 0; i < items; i++){
+        random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
+        
+
+#ifdef DEBUG    //use the item from the preallocated vector
+        item = &((*(sharedArgs.itemsPerProducer))[tid][i]);
+#endif
+        //Bounded Queue push
+        if constexpr (BoundedQueues::Contains<Q>){
+            while(!(queue.push(item,tid))){
+                loop(delay);
+                delay <<= 1;
+                delay = ((delay - 1) & (MAX_BACKOFF - 1)) + 1; //clamped bound
+            }
+            delay = MIN_BACKOFF;    //reset the delay
+        } else {
+            queue.push(item,tid);
+        }
+    }
+
+    sharedArgs.producersBarrier->arrive_and_wait();  //main can notify consumers to drain the queue
+    sharedArgs.threadsBarrier->arrive_and_wait();    //All threads are done by now
+#ifndef DEBUG
+    delete item;    //delete the preallocated item [if not in debug mode]
+#endif
+    return;
+}
+
+
+
+
+
+
+inline void consumer_check(std::vector<size_t>& lastSeen, const Data* item){
+    if(lastSeen[item->tid] >= item->value){
+        std::cerr << "ERROR: Producer " << item->tid << " sent item " << item->value << " after " << lastSeen[item->tid] << std::endl;
+        exit(1);
+    }
+    lastSeen[item->tid % lastSeen.size()] = item->value;
+}
+
+
+
+
+
+
+template<template<typename> typename Q>
+void consumer_routine(Q<Data> &queue, threadShared &sharedArgs, const int tid){
+    sharedArgs.threadsBarrier->arrive_and_wait(); //wait for main to set affinity
+
+#ifndef DISABLE_AFFINITY    //check with main that pinning was successful;
+    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    sharedArgs.threadsBarrier->arrive_and_wait();
+#endif
+
+#ifdef DEBUG    //if DEBUG then we check for total number of transfers and FIFO ordering amongst producers
+    std::vector<size_t> lastSeen(sharedArgs.producers,0);   //last seen value for each producer
+    uint64_t transfer = 0;  //number of items transferred
+#endif
+
+    Data *item = nullptr;
+    uint64_t delay = MIN_BACKOFF;    //initial delay
+    const size_t center = sharedArgs.center;
+    const size_t amplitude = sharedArgs.amplitude;
+    const size_t producers = sharedArgs.producers;
+    sharedArgs.threadsBarrier->arrive_and_wait();
+    
+    while(!sharedArgs.stopFlag->load(std::memory_order_relaxed)){   //the flag value is updated with store(std::memory_order_release)
+        item = queue.pop(tid);
+        //pop with delay if unsuccessful
+        if(item == nullptr){
+            loop(delay);
+            delay <<= 1;
+            delay = ((delay - 1) & (MAX_BACKOFF - 1)) + 1; //clamped bound
+        } else delay = MIN_BACKOFF;    //reset the delay
+
+#ifdef DEBUG    //the item gets checked if not nullptr
+        if(item != nullptr){
+            ++transfer;
+            consumer_check(lastSeen,item);  //bound to fail if item out of order [else updates lastSeen]
+        }
+#endif
+        for(size_t i = 0; i < producers; i++)
+            random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
+    }
+
+    //Queue draining
+    do{
+        item = queue.pop(tid);  //since all producers are done no need of delay
+#ifdef DEBUG
+        if(item != nullptr){    //check if the item is in order
+            ++transfer;
+            consumer_check(lastSeen,item);  //bound to fail if item out of order [else updates lastSeen]
+        }
+#endif
+        if(item == nullptr) break;
+        for(size_t i = 0; i < producers; i++)
+            random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
+    }while(true);
+
+    sharedArgs.threadsBarrier->arrive_and_wait();  //notify main that consumers are done [stops the measure]
+
+#ifdef DEBUG    //set the transfer value before exiting
+    (*sharedArgs.itemsPerConsumer)[tid % sharedArgs.consumers] = transfer;  //guarantees mod access to vector
+#endif
+    return;
 }

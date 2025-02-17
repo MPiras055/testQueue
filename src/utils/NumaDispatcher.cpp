@@ -227,18 +227,18 @@ void NumaDispatcher::dispatch_threads(const std::vector<std::thread>& threads){
     }
 };
 
-void NumaDispatcher::dispatch_threads(const std::vector<std::thread>& group1, std::vector<std::thread>& group2) {
-    int g1_size = group1.size();
-    int g2_size = group2.size();
+void NumaDispatcher::dispatch_threads(std::vector<std::thread>& group1, std::vector<std::thread>& group2) {
+    const int g1_size = group1.size();
+    const int g2_size = group2.size();
 
     // If either group is empty, dispatch the other group only
-    if (g1_size == 0) {
-        dispatch_threads(group2);
+    if(g1_size == 0 || g2_size == 0){
+        dispatch_threads(g1_size == 0? group2 : group1);
         return;
     }
-    if (g2_size == 0) {
-        dispatch_threads(group1);
-        return;
+
+    if(g1_size > g2_size){
+        std::swap(group1,group2);
     }
 
     // Calculate the thread dispatch ratio

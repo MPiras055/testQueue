@@ -45,7 +45,7 @@ public:
     void dispatch_threads(const std::vector<std::thread>&);
 
     //dispatches threads from each group considering their ratio
-    void dispatch_threads(const std::vector<std::thread>&, std::vector<std::thread>&);
+    void dispatch_threads(std::vector<std::thread>&, std::vector<std::thread>&);
     void print_core_map();
 
     /**
