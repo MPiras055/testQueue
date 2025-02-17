@@ -1,6 +1,7 @@
 #pragma once
 #include "HazardPointers.hpp"
 #include <stdexcept>
+#include <iostream>
 #include "Segment.hpp"
 #include "RQCell.hpp"
 
@@ -9,159 +10,164 @@
 #endif
 
 template<class T, class Segment>
-class BoundedSegmentAdapter{
+class BoundedSegmentAdapter {
 private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
-    static constexpr size_t MAX_SEGMENTS = 4; //maximum number of segments that can be allocated [low or too much pointer chasing]
-    static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
-    static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
+    static constexpr size_t MAX_SEGMENTS = 4;
+    static constexpr int kHpTail = 0;
+    static constexpr int kHpHead = 1;
+    
     const size_t maxSegments;
     const size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
-    alignas(CACHE_LINE) std::atomic<uint64_t> segmentTail; //the difference tells us if we can keep allocating new segments
-    alignas(CACHE_LINE) std::atomic<uint64_t> segmentHead;
-    
-    HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
+    alignas(CACHE_LINE) std::atomic<uint64_t> segmentHeadIdx;
+    alignas(CACHE_LINE) std::atomic<uint64_t> segmentTailIdx;
+
+    // used to prevent deadlock
+    alignas(CACHE_LINE) static inline thread_local bool check_first = false;
+
+    HazardPointers<Segment> HP;
 
 public:
-    /**
-     * @brief Constructor for the BoundedSegmentQueue
-     * @param size_par (size_t) sizeRing of the segments
-     * @param threads (size_t) number of threads [default: MAX_THREADS]
-     * 
-     * The constructor initializes the head and tail pointers to a new segment
-     */
-    BoundedSegmentAdapter(size_t size_par, size_t threads = MAX_THREADS, size_t segmentSize = 4):
-    //we initialize size to be Seggments / 4 so that max allocated segments account for total queeu length
-    maxSegments{segmentSize},
+    BoundedSegmentAdapter(size_t size_par, size_t threads = MAX_THREADS, size_t segmentCount = 4):
+    maxSegments{segmentCount},
 #ifndef DISABLE_POW2
-    sizeRing{(detail::isPowTwo(size_par)? size_par : detail::nextPowTwo(size_par))/segmentSize},
+    sizeRing{(detail::isPowTwo(size_par)? size_par : detail::nextPowTwo(size_par)) / maxSegments},
 #else 
     sizeRing{size_par},
 #endif
     maxThreads{threads},
-    HP(2,maxThreads)    
+    HP(2,maxThreads)
     {
 #ifndef DISABLE_HAZARD
-    assert(maxThreads <= MAX_THREADS);
+        assert(maxThreads <= MAX_THREADS);
 #endif
-        assert(sizeRing != 0);
+        assert(sizeRing > 0);
+
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
 
-        segmentHead.store(0, std::memory_order_relaxed);
-        segmentTail.store(0, std::memory_order_relaxed);
+        segmentHeadIdx.store(0, std::memory_order_relaxed);
+        segmentTailIdx.store(0, std::memory_order_relaxed);
     }
 
-    /**
-     * @brief Destructor for the Linked Ring Queue
-     * 
-     * Deletes all segments in the queue (also drains the queue)
-     */
     ~BoundedSegmentAdapter() {
         while(pop(0) != nullptr);
         delete head.load();
     }
 
-    static std::string className(bool padding = true){
-        return "BoundedSegment" + Segment::className(padding);
-    }
-
-    /**
-     * @brief Push operation on the linked queue
-     * @param item (T*) item to push
-     * @param tid (int) thread id
-     * 
-     * @note this operation is non-blocking and always succeeds
-     * @note if not explicitly set, then uses HazardPointers to ensure no memory leaks due to concurrent allocations and deletions
-     */
     __attribute__((used,always_inline)) bool push(T* item, int tid) {
         Segment* ltail = HP.protect(kHpTail, tail.load(), tid);
         while (true) {
+
 #ifndef DISABLE_HP
             //check for tail inconsistency
+            /**
+             * updates protection on the current global head
+             * if it's changed after last cycle
+             */
             Segment* ltail2 = tail.load();
             if (ltail2 != ltail) {
+                check_first = false;
                 ltail = HP.protect(kHpTail, ltail2, tid);
                 continue;
             }
 #endif
+
+            /**
+             * if a new segment is present then it tries to advance the global head
+             */
             Segment *lnext = ltail->next.load();
             //advance the global head
             if (lnext != nullptr) {
-                (tail.compare_exchange_strong(ltail, lnext))?
-                    ltail = HP.protect(kHpTail, lnext, tid)
-                :
+                if(tail.compare_exchange_strong(ltail, lnext)){
+                    ltail = HP.protect(kHpTail, lnext, tid);
+                }
+                else{
                     ltail = HP.protect(kHpTail, tail.load(), tid);
+                }
+                check_first = false;
                 continue;
             }
-
-            //try to push on the current segment
-            if (ltail->push(item, tid)) {
-                HP.clear(kHpTail, tid);
-                return true;
+            
+            /**
+             * We check the thread_local variable so that when each threads
+             * fails a push, if the segment is not updated, next time it will
+             * have to check if the current segment is closed
+             * 
+             * This is made because in attempting to push, the tailIndex of the 
+             * underlying Segments is updated and this could cause consumers not 
+             * to see that the buffer is empty even tho it is
+             */
+            if (!check_first) {
+                // check_first is false, so no need to check isClosed
+                if (ltail->push(item, tid)) {
+                    HP.clear(kHpTail, tid);
+                    return true;
+                }
+            } else {
+                // check_first is true, so we check isClosed
+                if (!(ltail->isClosed())) {
+                    // If the segment is not closed, attempt to push
+                    if (ltail->push(item, tid)) {
+                        HP.clear(kHpTail, tid);
+                        return true;
+                    }
+                }
             }
 
-            uint64_t currentTail = segmentTail.load(std::memory_order_acquire);
-            uint64_t currentHead = segmentHead.load(std::memory_order_acquire);
-
-            //can't allocate more segments
-            if(currentTail - currentHead >= maxSegments){
-                HP.clear(kHpTail, tid);
-                return false;
-            }
+            //sets check_first to true;
+            check_first = true;
             
 
-            //if push failed then the segment has been closed so try to create a new segment
-            Segment* newTail = new Segment(sizeRing,maxThreads,0);
+            // checks if the allocation can be made
+            if(segmentCount() > maxSegments){
+                HP.clear(kHpTail,tid);
+                return false;
+            }
+
+            Segment* newTail = new Segment(sizeRing,maxThreads,ltail->getNextSegmentStartIndex());
             newTail->push(item, tid);
 
             Segment* nullNode = nullptr;
 
-            //try to link the new segment
+            /**
+             * This operation is not made in mutual exclusion to ensure performance
+             * 
+             * this makes it harder to bound memory usage. In the worst case we get an
+             * additional segment so the overall complexity is O(l + l/s) so still linear
+             * in respect to the original length
+             */
             if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
-                Segment* oldTail = ltail;
                 tail.compare_exchange_strong(ltail, newTail);
-                currentTail = segmentTail.load(std::memory_order_acquire);
-                currentHead = segmentHead.load(std::memory_order_acquire);
-                /**
-                 * The segment shouldn't have been allocated so it gets closed
-                 * and doesn't accout as new tail;
-                 */
-                if(currentTail - currentHead >= maxSegments){
-                    //set the new segment as closed
-                    oldTail->closeSegment(true); //force closing the segment [always successful]
-                }
-                segmentTail.fetch_add(1,std::memory_order_release);
+                segmentTailIdx.fetch_add(1,std::memory_order_release);
+                check_first = false;
                 HP.clear(kHpTail, tid);
                 return true;
-            } else {
-                delete newTail;
             }
-            
+
+            delete newTail;
             ltail = HP.protect(kHpTail, nullNode, tid);
+            check_first = false;
         }
     }
+   
+    
+    
+    
+    static std::string className(bool padding = true){
+        return "BoundedSegment" + Segment::className(padding);
+    }
 
-
-    /**
-     * @brief Pop operation on the linked queue
-     * @param tid (int) thread id
-     * 
-     * @return (T*) item popped from the queue [nullptr if the queue is empty]
-     * 
-     * @note this operation is non-blocking
-     * @note if not explicitly set, then uses HazardPointers to ensure no memory leaks due to concurrent allocations and deletions
-     */
-    __attribute__((used,always_inline)) T* pop(int tid) {
+        __attribute__((used,always_inline)) T* pop(int tid) {
         Segment* lhead = HP.protect(kHpHead, head.load(), tid);
         while (true) {
 #ifndef DISABLE_HP
-            //check for tail inconsistency
+            //check for head inconsistency
             Segment* lhead2 = head.load();
             if (lhead2 != lhead) {
                 lhead = HP.protect(kHpHead, lhead2, tid);
@@ -170,55 +176,56 @@ public:
 #endif
             //try to pop from the current segment
             T* item = lhead->pop(tid);
-            if (item == nullptr){
-
-                Segment* lnext = lhead->next.load();
-                if (lnext != nullptr){
-                    item = lhead->pop(tid);
-                    if (item == nullptr) {
-                        if (head.compare_exchange_strong(lhead, lnext)) {
-                            HP.retire(lhead, tid);
-                            segmentHead.fetch_add(1,std::memory_order_release);
-                            lhead = HP.protect(kHpHead, lnext, tid);
-                        } else{ 
-                            lhead = HP.protect(kHpHead, lhead, tid); 
-                        }  
-                        continue;
-                    }
-                }
+            if (item != nullptr){
+                HP.clear(kHpHead, tid);
+                return item;
+                
             }
+
+            Segment* lnext = lhead->next.load();
+            if (lnext != nullptr){
+                item = lhead->pop(tid);
+                if (item == nullptr) {
+                    //When changing head segment
+                    if (head.compare_exchange_strong(lhead, lnext)) {
+                        segmentHeadIdx.fetch_add(1,std::memory_order_release);   //increment in the segmentHeadIdx Counter
+                        HP.retire(lhead, tid);
+                        lhead = HP.protect(kHpHead, lnext, tid);
+                    } else {  
+                        lhead = HP.protect(kHpHead, lhead, tid); 
+                    }  
+                    continue;
+                }
+
+                HP.clear(kHpHead, tid);
+                return item;
+            }
+            
+            //queue apperas empty
             HP.clear(kHpHead, tid);
-            return item;       
+            return nullptr;       
         }
     }
 
-    /**
-     * @brief Returns the current sizeRing of the queue
-     * @param tid (int) thread id
-     * 
-     * @return (size_t) sizeRing of the queue
-     * 
-     * @note this operation is non-blocking
-     * @note the value returned could be an approximation. Depends on the Segment implementation
-     * 
-     */
     size_t length(int tid) {
-        return 0;
+        Segment *lhead = HP.protect(kHpHead,head,tid);
+        Segment *ltail = HP.protect(kHpTail,tail,tid);
+        uint64_t t = ltail->getTailIndex();
+        uint64_t h = lhead->getHeadIndex();
+        HP.clear(tid);
+        return t > h ? t - h : 0;
     }
 
-    /**
-     * @brief returns the size of the queue
-     * 
-     * @returns (size_t) size of the queue
-     * @note it's useful when POW2 is disabled since the size attribute can differ from the parameter
-     * @warning if the queue uses segments of different sizes then the value returned could be incorrect
-     */
     inline size_t capacity() const {
         return sizeRing;
     }
 
-    uint64_t getSegmentCount() const{
-        return segmentTail.load(std::memory_order_acquire);
+private:
+    __attribute__((used,always_inline)) inline size_t segmentCount(){
+        /**
+         * if the threads are on the same segments we still count one segment allocated
+         */
+        return segmentTailIdx.load(std::memory_order_relaxed) - segmentHeadIdx.load(std::memory_order_relaxed) + 1;
     }
 
 };

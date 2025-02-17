@@ -1,13 +1,18 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
-#include "x86Atomics.hpp"
 #include <thread>
 #include <chrono>
 
-#ifndef CLUSTER_WAIT
-#define CLUSTER_WAIT 100ull //microseconds
+#ifndef CACHE_LINE
+#define CACHE_LINE 64
 #endif
+
+// #ifndef CLUSTER_WAIT
+// #define CLUSTER_WAIT (1ull << 16) //more or less 128.000 nanoseconds
+// #endif
+
+
 /**
  * Superclass for queue segments
  */
@@ -20,34 +25,29 @@ public:
     alignas(CACHE_LINE) std::atomic<Segment*> next{nullptr};
     alignas(CACHE_LINE) std::atomic<int> cluster{0};    //initializes the cluster to 0
 
-    /***
-     * @brief waits for the current thread to be on the same cluster as the segment
-     * 
-     * @param threadCluster (int) the cluster where the thread is executing
-     * 
-     * The function consists of several microsleeps for the thread to wait while checking 
-     * if the current segment cluster is the same as its cluster. If `MAX_SPINS` is reached
-     * then the thread tries to change the current cluster [doesn't check fails - guarantees forward progress]
-     * before exiting
-     * 
-     * @warning this function is useful only when the threads are pinned to a specific CPU [or Numa Node]
-     */
-    __attribute__((always_inline,used)) inline void waitOnCluster(int threadCluster){
-#ifndef DISABLE_AFFINITY
-        constexpr uint MAX_SPINS = 100;
-        constexpr uint sleep = CLUSTER_WAIT/MAX_SPINS;
-
-        int c = cluster.load(std::memory_order_acquire);
-        uint64_t sleepCycles = 0;
-        while(sleepCycles++ < MAX_SPINS){
-            if(c == threadCluster) return;  //someone else already setted the thread cluster
-            std::this_thread::sleep_for(std::chrono::microseconds(sleep));
-            c = cluster.load(std::memory_order_acquire);    //reload the current cluster
-        }
-        cluster.compare_exchange_strong(c,threadCluster,std::memory_order_release); 
-#endif  
-        return;
-    }
+//     /***
+//      * @brief waits for the current thread to be on the same cluster as the segment
+//      * 
+//      * @param threadCluster (int) the cluster where the thread is executing
+//      * 
+//      * The function consists of several microsleeps for the thread to wait while checking 
+//      * if the current segment cluster is the same as its cluster. If `MAX_SPINS` is reached
+//      * then the thread tries to change the current cluster [doesn't check fails - guarantees forward progress]
+//      * before exiting
+//      * 
+//      * @warning this function is useful only when the threads are pinned to a specific CPU [or Numa Node]
+//      */
+//     __attribute__((always_inline,used)) inline void waitOnCluster(int threadCluster){
+// #ifndef DISABLE_CLUSTER
+//         int c = cluster.load(std::memory_order_acquire);
+//         if(c != threadCluster){
+//             std::this_thread::sleep_for(std::chrono::nanoseconds{CLUSTER_WAIT});    //sleep for ~ 128 usec
+//         }
+//         c = cluster.load(std::memory_order_acquire);
+//         cluster.compare_exchange_weak(c,threadCluster,std::memory_order_relaxed);
+// #endif  
+//         return;
+//     }
 
 
     /**
@@ -64,6 +64,14 @@ public:
      */
     inline bool isClosed(uint64_t t) const {
         return (t & (1ull << 63)) != 0;
+    }
+
+    /**
+     * @brief check if rhe segment is closed without accessing the 
+     * tail index
+     */
+    inline bool isClosed() const {
+        return isClosed(tail.load());
     }
 
     /**
@@ -111,14 +119,20 @@ public:
     /**
      * @brief set the closed bit of a segment
      * 
+     * @param tailticket (uint64_t) the tail of the segment [can fail]
+     * @param force (bool) force the closing of the segment [always successful]
+     * 
      * @warning tipically when a segment closes it cant be reopened
      * @warning this function should only use standard C++ synchronization primitives
+     * 
+     * @note the function assumes that the tail is tailticket + 1 so the CAS is
+     * made tailticket + 1
      * 
      */
     inline bool closeSegment(const uint64_t tailticket,bool force) {
         if(force){
-            tail.fetch_or(1ull << 63);
-            return true;
+            tail.fetch_or(1ull << 63);  //implements a TAS on the MSB
+            return true;    //we don't need to check the value
         }
         else{
             uint64_t tmp = tailticket + 1;

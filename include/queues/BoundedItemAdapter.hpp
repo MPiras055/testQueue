@@ -8,19 +8,20 @@
 #define CACHE_LINE 64
 #endif
 
+
 template<class T, class Segment>
 class BoundedItemAdapter{
 private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
     static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
-    const size_t sizeRing;
+    size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
     alignas(CACHE_LINE) std::atomic<uint64_t> itemsPushed;
-    alignas(CACHE_LINE) std::atomic<uint64_t> itemsPopped; 
+    alignas(CACHE_LINE) std::atomic<uint64_t> itemsPopped;
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -40,6 +41,7 @@ public:
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
 #endif
+
         assert(sizeRing != 0);
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
@@ -73,6 +75,12 @@ public:
     __attribute__((used,always_inline)) bool push(T* item, int tid) {
         Segment* ltail = HP.protect(kHpTail, tail.load(), tid);
         while (true) {
+            //check if it's safe to push [controllo a fronte]
+            if(length() >= sizeRing){
+                HP.clear(kHpTail,tid);
+                return false;
+            }
+
 #ifndef DISABLE_HP
             //check for tail inconsistency
             Segment* ltail2 = tail.load();
@@ -90,39 +98,29 @@ public:
                     ltail = HP.protect(kHpTail, tail.load(), tid);
                 continue;
             }
-
-            //try to push on the current segment
+            
             if (ltail->push(item, tid)) {
                 itemsPushed.fetch_add(1,std::memory_order_release); //update the item counter
                 HP.clear(kHpTail, tid);
                 return true;
             }
-
-            uint64_t currentPushed = itemsPushed.load(std::memory_order_acquire);
-            uint64_t currentPopped = itemsPopped.load(std::memory_order_acquire);
-
-            //can't allocate more segments
-            if(itemsPushed - itemsPopped >= sizeRing){
-                HP.clear(kHpTail, tid);
-                return false;
-            }
             
 
             //if push failed then the segment has been closed so try to create a new segment
-            Segment* newTail = new Segment(sizeRing,maxThreads,0);
+            Segment* newTail = new Segment(sizeRing,maxThreads,ltail->getNextSegmentStartIndex());
             newTail->push(item, tid);
 
             Segment* nullNode = nullptr;
 
             //try to link the new segment
             if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
-                Segment* oldTail = ltail;
-                tail.compare_exchange_strong(ltail, newTail);
                 itemsPushed.fetch_add(1,std::memory_order_release); //update the item counter [if successful linking]
+                tail.compare_exchange_strong(ltail, newTail);
                 HP.clear(kHpTail, tid);
                 return true;
-            } else delete newTail;
-            
+            }
+
+            delete newTail;
             ltail = HP.protect(kHpTail, nullNode, tid);
         }
     }
@@ -149,26 +147,34 @@ public:
 #endif
             //try to pop from the current segment
             T* item = lhead->pop(tid);
-            if (item == nullptr){
-
-                Segment* lnext = lhead->next.load();
-                if (lnext != nullptr){
-                    item = lhead->pop(tid);
-                    if (item == nullptr) {
-                        if (head.compare_exchange_strong(lhead, lnext)) {
-                            HP.retire(lhead, tid);
-                            lhead = HP.protect(kHpHead, lnext, tid);
-                        } else{ 
-                            lhead = HP.protect(kHpHead, lhead, tid); 
-                        }  
-                        continue;
-                    }
-                }
+            if (item != nullptr){
+                itemsPopped.fetch_add(1,std::memory_order_release);
+                HP.clear(kHpHead, tid);
+                return item;
+                
             }
-            if(item != nullptr) //increment counter on successful extraction
-                itemsPopped.fetch_add(1,std::memory_order_release); //update the item counter
+
+            Segment* lnext = lhead->next.load();
+            if (lnext != nullptr){
+                item = lhead->pop(tid);
+                if (item == nullptr) {
+                    if (head.compare_exchange_strong(lhead, lnext)) {
+                        HP.retire(lhead, tid);
+                        lhead = HP.protect(kHpHead, lnext, tid);
+                    } else{ 
+                        lhead = HP.protect(kHpHead, lhead, tid); 
+                    }  
+                    continue;
+                }
+
+                itemsPopped.fetch_add(1,std::memory_order_release);
+                HP.clear(kHpHead, tid);
+                return item;
+            }
+            
+            //queue apperas empty
             HP.clear(kHpHead, tid);
-            return item;       
+            return nullptr;       
         }
     }
 
@@ -183,7 +189,12 @@ public:
      * 
      */
     size_t length(int tid) {
-        return 0;
+        Segment *lhead = HP.protect(kHpHead,head,tid);
+        Segment *ltail = HP.protect(kHpTail,tail,tid);
+        uint64_t t = ltail->getTailIndex();
+        uint64_t h = lhead->getHeadIndex();
+        HP.clear(tid);
+        return t > h ? t - h : 0;
     }
 
     /**
@@ -195,6 +206,10 @@ public:
      */
     inline size_t capacity() const {
         return sizeRing;
+    }
+
+    __attribute__((used,always_inline)) inline size_t length() const {
+        return itemsPushed.load(std::memory_order_relaxed) - itemsPopped.load(std::memory_order_relaxed);
     }
 
 };

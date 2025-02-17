@@ -8,7 +8,18 @@
 #include "LMTQ.hpp"
 #include "MuxQueue.hpp"
 
+using UnboundedQueues   = TemplateSet<  FAAQueue,
+                                        LCRQueue,
+                                        LinkedMuxQueue,
+                                        LMTQueue,
+                                        LPRQueue
+                                        >;
 
-using UnboundedQueues   = TemplateSet<FAAQueue,LCRQueue,LPRQueue,LinkedMuxQueue,LMTQueue>;
-using BoundedQueues     = TemplateSet<BoundedSegmentCRQueue,BoundedSegmentPRQueue,BoundedItemPRQueue,BoundedItemCRQueue,BoundedMuxQueue,BoundedMTQueue>;
+using BoundedQueues     = TemplateSet<  BoundedSegmentCRQueue,
+                                        BoundedItemCRQueue,
+                                        BoundedMuxQueue,
+                                        BoundedMTQueue,
+                                        BoundedSegmentPRQueue,
+                                        BoundedItemPRQueue>;
+                                        
 using Queues            = UnboundedQueues::Cat<BoundedQueues>;

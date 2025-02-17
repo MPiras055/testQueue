@@ -9,13 +9,14 @@
 #define TRY_CLOSE_MTQ 10
 #endif
 
+#define __MTQ_MIN_DELAY 128ul
+#define __MTQ_MAX_DELAY 1024ul
+
 template <typename T,bool padded_cells, bool bounded>
 class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
 private:
     using Base = QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>;
     using Cell = detail::CRQCell<T*,padded_cells>;
-
-    static inline thread_local int threadCluster = 0;
 
     Cell *array;
     const size_t sizeRing;
@@ -23,8 +24,7 @@ private:
 #ifndef DISABLE_POW2
     const size_t mask;  //Mask to execute the modulo operation
 #endif
-
-private:
+public:
     /**
      * @brief Private Constructor for MTQueue segment
      * 
@@ -56,8 +56,6 @@ private:
         Base::tail.store(start,std::memory_order_relaxed);
     }
 
-
-public:
     /**
      * @brief Constructor for MTQueue segment
      * 
@@ -90,12 +88,7 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) bool push(T *item,[[maybe_unused]] const int tid){
-        if constexpr (!bounded){
-            //try to optimize for numa architecture
-            //the functions only executes if AFFINITY is not disabled
-            Base::waitOnCluster(threadCluster);
-        }
-
+        unsigned long delay = __MTQ_MIN_DELAY;
 
         int try_close = 0;
         size_t tailTicket,idx;
@@ -116,6 +109,7 @@ public:
             if(tailTicket == idx){
                 if(Base::tail.compare_exchange_weak(tailTicket,tailTicket + 1,std::memory_order_relaxed)) //try to advance the index
                     break;
+                
             } else {
                 if(tailTicket > idx){
                     if constexpr (bounded){ //if queue is bounded then never closes the segment
@@ -132,6 +126,8 @@ public:
                     }
                 }
             }
+
+            backoff(delay); //delay for CAS retry
         }
         node->val = item;
         node->idx.store((idx + 1),std::memory_order_release);
@@ -147,14 +143,10 @@ public:
      * @note uses exponential decay backoff
      */
     __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid){
-        if constexpr (!bounded){
-            //try to optimize for numa architecture
-            //the functions only executes if AFFINITY is not disabled
-            Base::waitOnCluster(threadCluster);
-        }
+        unsigned long delay = __MTQ_MIN_DELAY;
         size_t headTicket,idx;
         Cell *node;
-        T* item;    //item to return;
+        T* item;
 
         while(true){
             headTicket = Base::head.load(std::memory_order_relaxed);
@@ -170,9 +162,12 @@ public:
                     break;
             }
             else if (diff < 0){ //check if queue is empty
-                if(Base::isEmpty())
+                if(Base::isEmpty()){
                     return nullptr;
+                }
             }
+
+            backoff(delay); //delay for CAS retry
         }
 
         item = node->val;
@@ -209,6 +204,18 @@ public:
         return sizeRing;
     }
 
+private:
+
+    /**
+     * Private method to perform between-CAS delay
+     */
+    __attribute__((used,always_inline)) void backoff(unsigned long& currentDelay){
+        for(uint32_t i = 0; i < currentDelay; ++i){
+            asm volatile("nop");    //busy waiting iterations
+        }
+        currentDelay = std::min(currentDelay << 1, __MTQ_MAX_DELAY);
+        return;
+    }
 
     friend class LinkedAdapter<T,MTQueue<T,padded_cells,bounded>>;   
 

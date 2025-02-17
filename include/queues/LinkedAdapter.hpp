@@ -13,7 +13,7 @@ private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
     static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
-    const size_t sizeRing;
+    size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
@@ -32,7 +32,7 @@ public:
     LinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
     sizeRing{SegmentLength},
     maxThreads{threads},
-    HP(2,maxThreads)    
+    HP(2,maxThreads)  
     {
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
