@@ -7,8 +7,8 @@
 #include "CacheRemap.hpp"
 #include "RQCell.hpp"
 #include "x86Atomics.hpp"
-#include "NumaDispatcher.hpp"
 
+//max retries for closing segment [assuming spurious fails]
 #ifndef TRY_CLOSE_CRQ 
 #define TRY_CLOSE_CRQ 10
 #endif
@@ -33,30 +33,21 @@ private:
     const size_t sizeRing;
     [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
 #ifndef DISABLE_POW2
-    size_t mask;  //Mask to execute the modulo operation
+    const size_t mask;  //Mask to execute the modulo operation
 #endif
+
     /** 
-     * @brief returns the index of the current node [without the MSB]
+     * @brief extracts the index (63 LSB) from a given value
      * */
-    inline uint64_t node_index(uint64_t i) const {
-        return (i & ~(1ull << 63));
-    }
+    inline uint64_t node_index(uint64_t i) const { return (i & ~(1ull << 63));}
     /** 
-     * @brief checks if a node is unsafe
-     * 
-     * @note checks the MSB of the index
+     * @brief extracts the MSB of a value
      * */
-    inline uint64_t node_unsafe(uint64_t i) const {
-        return (i & (1ull << 63));
-    }
+    inline uint64_t node_unsafe(uint64_t i) const { return (i & (1ull << 63));}
     /** 
-     * @brief sets the unsafe bit of a given index 
-     * 
-     * @note sets the MSB of the index
+     * @brief sets the MSB of a value to 1
      */
-    inline uint64_t set_unsafe(uint64_t i) const {
-        return (i | (1ull << 63));
-    }
+    inline uint64_t set_unsafe(uint64_t i) const { return (i | (1ull << 63)); }
 
 public:
     /**
@@ -66,7 +57,7 @@ public:
      * @param tid (int) thread id [not used]
      * @param start (uint64_t) start index of the segment [useful for LinkedRing Adaptation]
      * 
-     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
+     * @note the `tid` parameters is not used but is kept for compatibility with the LPRQ
      */
     CRQueue(size_t size_par,[[maybe_unused]] const int tid, const uint64_t start): Base(), 
 #ifndef DISABLE_POW2
@@ -132,7 +123,7 @@ public:
      * 
      * @returns (bool) true if the operation is successful
      * 
-     * @note the `tid` parameter is not used but is kept for compatibility with the LinkedAdapter
+     * @note the `tid` parameter is not used but is kept for compatibility with the LPRQ
      * @note if queue is instantiated as bounded then the segment never closes
      * @warning uses 2CAS operation implemented as asm routines in x86Atomics.hpp
      */
@@ -161,7 +152,7 @@ public:
                 }
             }
             if (tailticket >= Base::head.load() + sizeRing) {
-                if (Base::closeSegment(tailticket,try_close++ > TRY_CLOSE_CRQ))
+                if (Base::closeSegment(tailticket,++try_close > TRY_CLOSE_CRQ))
                     return false;
             }
         }

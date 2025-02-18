@@ -1,5 +1,8 @@
 /build
 /.vscode
+/csv
+/graphs
+*.zip
 *.csv
 *.json
 *.png

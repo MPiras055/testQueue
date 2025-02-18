@@ -3,9 +3,9 @@ set(CMAKE_CXX_STANDARD 20)
 project(QueueBenchmarks)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message (STATUS "Targeting Debug Build")
+    message (STATUS "INFO: Targeting Debug Build")
 else()
-    message (STATUS "Targeting Release Build")
+    message (STATUS "INFO: Targeting Release Build")
 endif()
 
 
@@ -17,10 +17,9 @@ set(HEADER_DIRS
 )
 
 # -- Macros Definitions -- #
-option (DISABLE_AFFINITY "Disable Thread Pinning to Cores" ON)
+option (DISABLE_AFFINITY "Disable Thread Pinning to Cores" OFF)
 option (DISABLE_HAZARD "Disable Hazard Pointers" OFF)
 option (DISABLE_POW2 "Disable rounding up to power of 2 for queue size" OFF)
-option (DISABLE_CLUSTER "Disable NUMA-awareness" ON)
 
 
 # -- jemalloc
@@ -58,10 +57,6 @@ function(add_benchmark exec_name)
     if(DISABLE_POW2)
         message (STATUS ${exec_name}": Disabling rounding up to power of 2 for queue size")
         target_compile_definitions(${exec_name} PUBLIC DISABLE_POW2)
-    endif()
-    if(DISABLE_CLUSTER)
-        message (STATUS "${exec_name}: Disabling NUMA-awareness")
-        target_compile_definitions(${exec_name} PUBLIC DISABLE_CLUSTER)
     endif()
 
 

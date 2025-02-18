@@ -11,7 +11,7 @@
 #endif
 
 #ifndef HAZARD_MAX
-#define HAZARD_MAX 256
+#define HAZARD_MAX 256  //max hazard pointers that a thread can have
 #endif
 
 template<typename T>
@@ -77,7 +77,6 @@ public:
     /**
      * @brief Clear all hazard pointers for a given thread
      * @param tid (int) thread id
-     * 
      */
     __attribute__((used,always_inline)) void clear(const int tid){
         for(int iHP = 0; iHP < maxHPs; iHP++){

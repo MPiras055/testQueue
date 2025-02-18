@@ -10,8 +10,8 @@ template<typename T, bool bounded>
 class MuxQueue {
 private:
     std::deque<T*> queue;
-    std::mutex       mux;   
-    size_t           sizeRing;
+    std::mutex mux;   
+    size_t sizeRing;
 
 
 public:

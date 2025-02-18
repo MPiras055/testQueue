@@ -3,15 +3,21 @@
 #include "LinkedAdapter.hpp"
 #include "RQCell.hpp"
 #include "CacheRemap.hpp"
-#include "NumaDispatcher.hpp"
 
 #ifndef TRY_CLOSE_MTQ
 #define TRY_CLOSE_MTQ 10
 #endif
 
+//delay for CAS retry
 #define __MTQ_MIN_DELAY 128ul
 #define __MTQ_MAX_DELAY 1024ul
 
+
+/**
+ * follows the implementation of a MPMC queue segment based on CAS-loop
+ * 
+ * @note atomic ops are in respect to std::memory_order_acquire - release
+ */
 template <typename T,bool padded_cells, bool bounded>
 class MTQueue : public QueueSegmentBase<T, MTQueue<T,padded_cells,bounded>>{
 private:
@@ -33,7 +39,6 @@ public:
      * @param start (uint64_t) start index of the segment [useful for LinkedRing Adaptation]
      * 
      * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
-     * @exception std::invalid_argument if the size is 0
      */
     MTQueue(size_t size_par,[[maybe_unused]] const int tid, uint64_t start): Base(), 
 #ifndef DISABLE_POW2
@@ -48,8 +53,13 @@ public:
 
         //sets the fields of the Cell given the startingIndex (default 0)
         for(uint64_t i = start; i < start + sizeRing; ++i){
+#ifdef DISABLE_POW2
             array[remap[i % sizeRing]].val.store(nullptr,std::memory_order_relaxed);
-            array[remap[i % sizeRing]].idx.store(i,std::memory_order_relaxed);           
+            array[remap[i % sizeRing]].idx.store(i,std::memory_order_relaxed);    
+#else
+            array[remap[i & mask]].val.store(nullptr,std::memory_order_relaxed);
+            array[remap[i & mask]].idx.store(i,std::memory_order_relaxed);
+#endif       
         }
 
         Base::head.store(start,std::memory_order_relaxed);
@@ -74,7 +84,7 @@ public:
 
     static std::string className(bool padding = true) {
         using namespace std::string_literals;
-        return (bounded? "Bounded"s : ""s ) + "MTQueue"s + ((padded_cells && padding)? "/padded":"");
+        return (bounded? "Bounded"s : ""s ) + "MTQueue"s + ((padding && padded_cells)? "/padded":"");
     }
 
     /**
@@ -116,11 +126,12 @@ public:
                         return false;
                     }
                     else{
-                        /*
-                            The Base::closeSegment function is designed to close segments for fetch_add queues
-                            to compensate we use tailTicket - 1 to close the current segment
-                        */
-                        if (Base::closeSegment(tailTicket-1,try_close++ < TRY_CLOSE_MTQ)){
+                        /**
+                         * sets the MSB of the tail index
+                         * 
+                         * @note -1 because ::closeSegment incremements ro account for FAA based queues
+                         */
+                        if (Base::closeSegment(tailTicket-1, ++try_close > TRY_CLOSE_MTQ)){
                             return false;
                         }
                     }
@@ -187,7 +198,7 @@ public:
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
         if constexpr (bounded){
-            int length = Base::tail.load() - Base::head.load();
+            int length = Base::tail.load(std::memory_order_acquire) - Base::head.load(std::memory_order_release);
             return length > 0 ? length : 0;
         } else {
             return Base::length();
@@ -209,10 +220,11 @@ private:
     /**
      * Private method to perform between-CAS delay
      */
-    __attribute__((used,always_inline)) void backoff(unsigned long& currentDelay){
-        for(uint32_t i = 0; i < currentDelay; ++i){
+    __attribute__((used,always_inline)) void backoff(unsigned long currentDelay){
+        while(currentDelay-- != 0)
             asm volatile("nop");    //busy waiting iterations
-        }
+        
+        //update the delay for next iteration
         currentDelay = std::min(currentDelay << 1, __MTQ_MAX_DELAY);
         return;
     }

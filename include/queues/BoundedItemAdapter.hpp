@@ -15,7 +15,7 @@ private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
     static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
-    size_t sizeRing;
+    const size_t sizeRing;
     const size_t maxThreads;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
@@ -179,25 +179,6 @@ public:
     }
 
     /**
-     * @brief Returns the current sizeRing of the queue
-     * @param tid (int) thread id
-     * 
-     * @return (size_t) sizeRing of the queue
-     * 
-     * @note this operation is non-blocking
-     * @note the value returned could be an approximation. Depends on the Segment implementation
-     * 
-     */
-    size_t length(int tid) {
-        Segment *lhead = HP.protect(kHpHead,head,tid);
-        Segment *ltail = HP.protect(kHpTail,tail,tid);
-        uint64_t t = ltail->getTailIndex();
-        uint64_t h = lhead->getHeadIndex();
-        HP.clear(tid);
-        return t > h ? t - h : 0;
-    }
-
-    /**
      * @brief returns the size of the queue
      * 
      * @returns (size_t) size of the queue
@@ -208,6 +189,15 @@ public:
         return sizeRing;
     }
 
+
+    /**
+     * @brief Returns the current sizeRing of the queue
+     * @param tid (int) thread id
+     * 
+     * @return (size_t) sizeRing of the queue
+     * 
+     * @note this operation is non-blocking
+     */
     __attribute__((used,always_inline)) inline size_t length() const {
         return itemsPushed.load(std::memory_order_relaxed) - itemsPopped.load(std::memory_order_relaxed);
     }

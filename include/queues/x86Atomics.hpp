@@ -1,6 +1,10 @@
 #pragma once
 
-
+/**
+ * @note this implementation is used as experimental for LCRQ
+ * 
+ * @brief x86_64 double_wide CAS operation
+ */
 #define __CAS2(ptr, o1, o2, n1, n2)                             \
 ({                                                              \
     char __ret;                                                 \
@@ -18,6 +22,11 @@
 #define CAS2(ptr, o1, o2, n1, n2)    __CAS2(ptr, o1, o2, n1, n2)
 
 
+/**
+ * @note this implementation is not used in current version
+ * 
+ * @note to implement the TAS63 we use an atomic fetch_or(1 << 64) operation on an atomic integer
+ */
 #define BIT_TEST_AND_SET63(ptr)                                 \
 ({                                                              \
     char __ret;                                                 \

@@ -1,20 +1,15 @@
 #pragma once
 #include <atomic>
 #include <cstddef>
-#include <thread>
-#include <chrono>
 
 #ifndef CACHE_LINE
 #define CACHE_LINE 64
 #endif
 
-// #ifndef CLUSTER_WAIT
-// #define CLUSTER_WAIT (1ull << 16) //more or less 128.000 nanoseconds
-// #endif
-
-
-/**
- * Superclass for queue segments
+/***
+ * @brief Base superclass for all queue segments
+ * 
+ * @note all atomic operations are in respect to std::memory_order_seq_cst
  */
 template <class T,class Segment>
 struct QueueSegmentBase {
@@ -23,32 +18,6 @@ public:
     alignas(CACHE_LINE) std::atomic<uint64_t> head{0};
     alignas(CACHE_LINE) std::atomic<uint64_t> tail{0};
     alignas(CACHE_LINE) std::atomic<Segment*> next{nullptr};
-    alignas(CACHE_LINE) std::atomic<int> cluster{0};    //initializes the cluster to 0
-
-//     /***
-//      * @brief waits for the current thread to be on the same cluster as the segment
-//      * 
-//      * @param threadCluster (int) the cluster where the thread is executing
-//      * 
-//      * The function consists of several microsleeps for the thread to wait while checking 
-//      * if the current segment cluster is the same as its cluster. If `MAX_SPINS` is reached
-//      * then the thread tries to change the current cluster [doesn't check fails - guarantees forward progress]
-//      * before exiting
-//      * 
-//      * @warning this function is useful only when the threads are pinned to a specific CPU [or Numa Node]
-//      */
-//     __attribute__((always_inline,used)) inline void waitOnCluster(int threadCluster){
-// #ifndef DISABLE_CLUSTER
-//         int c = cluster.load(std::memory_order_acquire);
-//         if(c != threadCluster){
-//             std::this_thread::sleep_for(std::chrono::nanoseconds{CLUSTER_WAIT});    //sleep for ~ 128 usec
-//         }
-//         c = cluster.load(std::memory_order_acquire);
-//         cluster.compare_exchange_weak(c,threadCluster,std::memory_order_relaxed);
-// #endif  
-//         return;
-//     }
-
 
     /**
      * @brief get the index given the tail [ignores the MSB]
@@ -96,7 +65,7 @@ public:
             uint64_t t = tail.load();
             uint64_t h = head.load();
             if (tail.load() != t) continue; //inconsistent tail
-            if (h > t) { // h would be less than t if queue is closed
+            if (h > t) {
                 uint64_t tmp = t;
                 if (tail.compare_exchange_strong(tmp, h))
                     break;
@@ -119,17 +88,17 @@ public:
     /**
      * @brief set the closed bit of a segment
      * 
-     * @param tailticket (uint64_t) the tail of the segment [can fail]
+     * @param tailticket (uint64_t) the tail of the segmen
      * @param force (bool) force the closing of the segment [always successful]
      * 
      * @warning tipically when a segment closes it cant be reopened
-     * @warning this function should only use standard C++ synchronization primitives
+     * @warning this function only uses standard C++ synchronization primitives
      * 
      * @note the function assumes that the tail is tailticket + 1 so the CAS is
      * made tailticket + 1
      * 
      */
-    inline bool closeSegment(const uint64_t tailticket,bool force) {
+    inline bool closeSegment(const uint64_t tailticket, bool force) {
         if(force){
             tail.fetch_or(1ull << 63);  //implements a TAS on the MSB
             return true;    //we don't need to check the value
@@ -142,10 +111,10 @@ public:
 
     /**
      * @brief set the closed bit of a segment 
-     * @note calls bool closeSegment(const uint64_t)
+     * @note wrapper to bool closeSegment(const uint64_t tailticket, bool force)
      */
     inline bool closeSegment(bool force) {
-        return closeSegment(tail.load()-1,force); //minus one to not accout for the fetch-add operation
+        return closeSegment(tail.load() -1 ,force); // -1 to account for FAA based segments
     }
 
     /**

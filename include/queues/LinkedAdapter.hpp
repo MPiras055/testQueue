@@ -19,7 +19,8 @@ private:
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
     
-    HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
+    //Hazard pointer matrix to ensure memory management on concurrent shared enviroment
+    HazardPointers<Segment> HP;
 
 public:
     /**
@@ -27,7 +28,7 @@ public:
      * @param SegmentLength     (size_t) sizeRing of the segments
      * @param threads           (size_t) number of threads [default: MAX_THREADS]
      * 
-     * The constructor initializes the head and tail pointers to a new segment
+     * @note The constructor initializes the head and tail pointers to a new segment
      */
     LinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
     sizeRing{SegmentLength},
@@ -76,7 +77,8 @@ public:
             }
 #endif
             Segment *lnext = ltail->next.load();
-            //advance the global head
+            
+            //advance the global head if present
             if (lnext != nullptr) {
                 if(tail.compare_exchange_strong(ltail, lnext)){
                     ltail = HP.protect(kHpTail, lnext, tid);

@@ -26,8 +26,14 @@ private:
     alignas(CACHE_LINE) std::atomic<uint64_t> segmentHeadIdx;
     alignas(CACHE_LINE) std::atomic<uint64_t> segmentTailIdx;
 
-    // used to prevent deadlock
-    alignas(CACHE_LINE) static inline thread_local bool check_first = false;
+    /**
+     * upon failed push each thread sets the skip_push variable that gets reset when the current segment
+     * is changed. If the segment remains the same, before attempting further push it's checked if the current
+     * segment is closed
+     * 
+     * @note mantains its state between push/pops operations
+     */
+    alignas(CACHE_LINE) static inline thread_local bool skip_push = false;
 
     HazardPointers<Segment> HP;
 
@@ -60,6 +66,11 @@ public:
         delete head.load();
     }
 
+    static std::string className(bool padding = true){
+        return "BoundedSegment" + Segment::className(padding);
+    }
+
+
     __attribute__((used,always_inline)) bool push(T* item, int tid) {
         Segment* ltail = HP.protect(kHpTail, tail.load(), tid);
         while (true) {
@@ -72,7 +83,7 @@ public:
              */
             Segment* ltail2 = tail.load();
             if (ltail2 != ltail) {
-                check_first = false;
+                skip_push = false;
                 ltail = HP.protect(kHpTail, ltail2, tid);
                 continue;
             }
@@ -90,41 +101,29 @@ public:
                 else{
                     ltail = HP.protect(kHpTail, tail.load(), tid);
                 }
-                check_first = false;
+                skip_push = false;  //is segment is changed then we perform an "exploratory" push
                 continue;
             }
             
             /**
-             * We check the thread_local variable so that when each threads
-             * fails a push, if the segment is not updated, next time it will
-             * have to check if the current segment is closed
+             * If skip_push is set to true we don't perform push operation if the current segment is closed
              * 
-             * This is made because in attempting to push, the tailIndex of the 
-             * underlying Segments is updated and this could cause consumers not 
-             * to see that the buffer is empty even tho it is
+             * If the push operation on the current segment fails then skip_push is set to true until the segment
+             * reference is changed (via segment update) 
              */
-            if (!check_first) {
-                // check_first is false, so no need to check isClosed
-                if (ltail->push(item, tid)) {
-                    HP.clear(kHpTail, tid);
-                    return true;
-                }
-            } else {
-                // check_first is true, so we check isClosed
-                if (!(ltail->isClosed())) {
-                    // If the segment is not closed, attempt to push
-                    if (ltail->push(item, tid)) {
-                        HP.clear(kHpTail, tid);
-                        return true;
-                    }
-                }
-            }
 
-            //sets check_first to true;
-            check_first = true;
+            if(skip_push)
+                skip_push = ltail->isClosed();
+
+            if(!skip_push){
+                if(ltail->push(item,tid)){
+                    HP.clear(kHpTail,tid);
+                    return true;
+                } else skip_push = true;
+            }
             
 
-            // checks if the allocation can be made
+            // checks if the following allocation doesn't exceed the max limit
             if(segmentCount() > maxSegments){
                 HP.clear(kHpTail,tid);
                 return false;
@@ -135,32 +134,19 @@ public:
 
             Segment* nullNode = nullptr;
 
-            /**
-             * This operation is not made in mutual exclusion to ensure performance
-             * 
-             * this makes it harder to bound memory usage. In the worst case we get an
-             * additional segment so the overall complexity is O(l + l/s) so still linear
-             * in respect to the original length
-             */
+            //The segment update is not made in mutual exclusion to ensure performance (the memory bound increases)
             if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
                 tail.compare_exchange_strong(ltail, newTail);
                 segmentTailIdx.fetch_add(1,std::memory_order_release);
-                check_first = false;
+                skip_push = false;
                 HP.clear(kHpTail, tid);
                 return true;
             }
 
             delete newTail;
             ltail = HP.protect(kHpTail, nullNode, tid);
-            check_first = false;
+            skip_push = false;
         }
-    }
-   
-    
-    
-    
-    static std::string className(bool padding = true){
-        return "BoundedSegment" + Segment::className(padding);
     }
 
         __attribute__((used,always_inline)) T* pop(int tid) {
@@ -188,7 +174,7 @@ public:
                 if (item == nullptr) {
                     //When changing head segment
                     if (head.compare_exchange_strong(lhead, lnext)) {
-                        segmentHeadIdx.fetch_add(1,std::memory_order_release);   //increment in the segmentHeadIdx Counter
+                        segmentHeadIdx.fetch_add(1,std::memory_order_release);
                         HP.retire(lhead, tid);
                         lhead = HP.protect(kHpHead, lnext, tid);
                     } else {  
@@ -222,9 +208,7 @@ public:
 
 private:
     __attribute__((used,always_inline)) inline size_t segmentCount(){
-        /**
-         * if the threads are on the same segments we still count one segment allocated
-         */
+        //if the threads are on the same segments we still count one segment allocated
         return segmentTailIdx.load(std::memory_order_relaxed) - segmentHeadIdx.load(std::memory_order_relaxed) + 1;
     }
 
