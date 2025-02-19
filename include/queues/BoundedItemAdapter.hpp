@@ -192,13 +192,13 @@ public:
 
     /**
      * @brief Returns the current sizeRing of the queue
-     * @param tid (int) thread id
+     * @param tid (int) thread id [keeps interface]
      * 
      * @return (size_t) sizeRing of the queue
      * 
      * @note this operation is non-blocking
      */
-    __attribute__((used,always_inline)) inline size_t length() const {
+    __attribute__((used,always_inline)) inline size_t length([[maybe_unused]] const int tid = 0) const {
         return itemsPushed.load(std::memory_order_relaxed) - itemsPopped.load(std::memory_order_relaxed);
     }
 

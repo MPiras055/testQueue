@@ -198,7 +198,7 @@ public:
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
         if constexpr (bounded){
-            int length = Base::tail.load(std::memory_order_acquire) - Base::head.load(std::memory_order_release);
+            int length = Base::tail.load(std::memory_order_acquire) - Base::head.load(std::memory_order_acquire);
             return length > 0 ? length : 0;
         } else {
             return Base::length();

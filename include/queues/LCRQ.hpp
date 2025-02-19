@@ -13,12 +13,15 @@
 #define TRY_CLOSE_CRQ 10
 #endif
 
+#ifndef CACHE_LINE
+#define CACHE_LINE 64
+#endif
+
 template <typename T, bool padded_cells>
 class CRQueue : public QueueSegmentBase<T, CRQueue<T, padded_cells>> {
 private:
     using Base = QueueSegmentBase<T, CRQueue<T, padded_cells>>;
     using Cell = detail::CRQCell<T *, padded_cells>;
-    Cell *array;
 
     /**
      * @brief thread_local variable to store the current numa node
@@ -31,10 +34,12 @@ private:
      */
 
     const size_t sizeRing;
-    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
 #ifndef DISABLE_POW2
     const size_t mask;  //Mask to execute the modulo operation
 #endif
+
+    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
+    Cell *array;
 
     /** 
      * @brief extracts the index (63 LSB) from a given value
@@ -62,12 +67,12 @@ public:
     CRQueue(size_t size_par,[[maybe_unused]] const int tid, const uint64_t start): Base(), 
 #ifndef DISABLE_POW2
     //we could want to initialize a segment as 0 as a sentinel
-    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
+    sizeRing{(size_par != 1) && detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
     mask{sizeRing - 1},  //sets the mask to perform modulo operation
 #else
     sizeRing{size_par},
 #endif
-    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(sizeRing)) //initialize the cache remap
+    remap{CacheRemap<sizeof(Cell),CACHE_LINE>(sizeRing)} //initialize the cache remap
     {
         array = new Cell[sizeRing];
 
@@ -257,7 +262,7 @@ using LCRQueue = LinkedAdapter<T, CRQueue<T, false>>;
 #else
 using BoundedSegmentCRQueue = BoundedSegmentAdapter<T, CRQueue<T, true>>;
 template <typename T>
-using BoundedItemCRQueue = BoundedItemAdapter<T, CRQueue<T, false>>;
+using BoundedItemCRQueue = BoundedItemAdapter<T, CRQueue<T, true>>;
 template <typename T>
 using LCRQueue = LinkedAdapter<T, CRQueue<T, true>>;
 #endif

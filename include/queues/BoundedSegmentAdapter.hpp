@@ -20,6 +20,7 @@ private:
     const size_t maxSegments;
     const size_t sizeRing;
     const size_t maxThreads;
+    const size_t fullLength;
 
     alignas(CACHE_LINE) std::atomic<Segment*> head;
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
@@ -46,6 +47,7 @@ public:
     sizeRing{size_par},
 #endif
     maxThreads{threads},
+    fullLength{sizeRing * maxSegments},
     HP(2,maxThreads)
     {
 #ifndef DISABLE_HAZARD
@@ -124,7 +126,7 @@ public:
             
 
             // checks if the following allocation doesn't exceed the max limit
-            if(segmentCount() > maxSegments){
+            if(segmentCount() >= maxSegments){
                 HP.clear(kHpTail,tid);
                 return false;
             }
@@ -193,7 +195,7 @@ public:
         }
     }
 
-    size_t length(int tid) {
+    size_t length([[maybe_unused]] const int tid = 0) {
         Segment *lhead = HP.protect(kHpHead,head,tid);
         Segment *ltail = HP.protect(kHpTail,tail,tid);
         uint64_t t = ltail->getTailIndex();
@@ -203,11 +205,11 @@ public:
     }
 
     inline size_t capacity() const {
-        return sizeRing;
+        return fullLength;
     }
 
 private:
-    __attribute__((used,always_inline)) inline size_t segmentCount(){
+    __attribute__((used,always_inline)) inline size_t segmentCount() const {
         //if the threads are on the same segments we still count one segment allocated
         return segmentTailIdx.load(std::memory_order_relaxed) - segmentHeadIdx.load(std::memory_order_relaxed) + 1;
     }

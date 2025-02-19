@@ -10,19 +10,23 @@
 #define TRY_CLOSE_PRQ 10
 #endif
 
+#ifndef CACHE_LINE
+#define CACHE_LINE 64
+#endif
+
 template<typename T,bool padded_cells>
 class PRQueue : public QueueSegmentBase<T, PRQueue<T,padded_cells>> {
 private:
     using Base = QueueSegmentBase<T,PRQueue<T,padded_cells>>;
     using Cell = detail::CRQCell<void*,padded_cells>;
 
-    [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
-
-    Cell* array; 
-    const size_t size;
+    const size_t sizeRing;
 #ifndef DISABLE_POW2
     const size_t mask;  //Mask to execute the modulo operation as bitwise AND
 #endif
+
+    Cell* array; 
+    [[no_unique_address]] const CacheRemap<sizeof(Cell),CACHE_LINE> remap;
 
     /**
      * @brief Extracts the index from a given value [63 LSB]
@@ -63,27 +67,25 @@ private:
 private:
     //uses the tid argument to be consistent with linked queues
     PRQueue(size_t size_par, [[maybe_unused]] const int tid, const uint64_t start): Base(),
-#ifndef DISABLE_POW2
-    size{detail::isPowTwo(size_par)? size_par : detail::nextPowTwo(size_par)},
-    mask{size - 1},
+    #ifndef DISABLE_POW2
+    sizeRing{(size_par != 1) && detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
+    mask{sizeRing - 1},  //sets the mask to perform modulo operation
 #else
-    size{size_par},
+    sizeRing{size_par},
 #endif
-    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(size)) //initialize the cache remap
+    remap{CacheRemap<sizeof(Cell),CACHE_LINE>(sizeRing)} //initialize the cache remap
     {
-        assert(size_par > 0);
-        array = new Cell[size];
+        array = new Cell[sizeRing];
 
-        for(uint64_t i = start; i < start + size; i++){
+        for(uint64_t i = start; i < start + sizeRing; i++){
 #ifdef DISABLE_POW2
-            array[remap[i % size]].val.store(nullptr,std::memory_order_relaxed);
-            array[remap[i % size]].idx.store(i,std::memory_order_relaxed);       
-#else 
+            array[remap[i % sizeRing]].val.store(nullptr,std::memory_order_relaxed);
+            array[remap[i % sizeRing]].idx.store(i,std::memory_order_relaxed);       
+#else
             array[remap[i & mask]].val.store(nullptr,std::memory_order_relaxed);
             array[remap[i & mask]].idx.store(i,std::memory_order_relaxed);    
 #endif 
         }
-
         Base::head.store(start,std::memory_order_relaxed);
         Base::tail.store(start,std::memory_order_relaxed);
     }
@@ -116,7 +118,6 @@ public:
      * @warning if the operation is unsuccessful the operation shoudn't be called again [prone to consumer livelock]
      */
     __attribute__((used,always_inline)) bool push(T* item, const int tid) {
-
         int try_close = 0;
 
         while (true) {
@@ -125,7 +126,7 @@ public:
                 return false;
             }
 #ifdef DISABLE_POW2
-            Cell& cell = array[remap[tailticket % size]];
+            Cell& cell = array[remap[tailticket % sizeRing]];
 #else
             Cell& cell = array[remap[tailticket & mask]];
 #endif
@@ -139,7 +140,7 @@ public:
                         void* bottom = threadLocalBottom(tid);
 
                         if (cell.val.compare_exchange_strong(val, bottom)) {
-                            if (cell.idx.compare_exchange_strong(idx, tailticket + size)) {
+                            if (cell.idx.compare_exchange_strong(idx, tailticket + sizeRing)) {
                                 if (cell.val.compare_exchange_strong(bottom, item)) {
                                     return true;
                                 }
@@ -150,7 +151,7 @@ public:
                     }
                 }
             }
-            if (tailticket >= Base::head.load() + size) {
+            if (tailticket >= Base::head.load() + sizeRing) {
                 if (Base::closeSegment(tailticket, ++try_close > TRY_CLOSE_PRQ))
                     return false;
             }
@@ -176,7 +177,7 @@ public:
         while (true) {
             uint64_t headticket = Base::head.fetch_add(1);
 #ifdef DISABLE_POW2
-            Cell& cell = array[remap[headticket % size]];
+            Cell& cell = array[remap[headticket % sizeRing]];
 #else
             Cell& cell = array[remap[headticket & mask]];
 #endif
@@ -193,11 +194,11 @@ public:
                 if(cell_idx != cell.idx.load())
                     continue;
 
-                if (idx > (headticket + size))
+                if (idx > (headticket + sizeRing))
                     break;
 
                 if ((val != nullptr) && !isBottom(val)) {
-                    if (idx == (headticket + size)) {   //only one dequeuer will pass this condition
+                    if (idx == (headticket + sizeRing)) {   //only one dequeuer will pass this condition
                         cell.val.store(nullptr);
                         return static_cast<T*>(val);
                     } else {
@@ -229,7 +230,7 @@ public:
                         if (isBottom(val) && !cell.val.compare_exchange_strong(val, nullptr))
                             continue;
                         //if the cell is unsafe then it's shifted to the next epoch (another dequeuer dequeue will try to fix it)
-                        if (cell.idx.compare_exchange_strong(cell_idx, unsafe | (headticket + size))){
+                        if (cell.idx.compare_exchange_strong(cell_idx, unsafe | (headticket + sizeRing))){
                             break;
                         }
                     }

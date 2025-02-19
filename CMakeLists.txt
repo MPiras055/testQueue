@@ -9,7 +9,6 @@ else()
 endif()
 
 
-
 set(HEADER_DIRS
     ${CMAKE_SOURCE_DIR}/include/queues/
     ${CMAKE_SOURCE_DIR}/include/utils    
@@ -27,10 +26,15 @@ find_package(PkgConfig REQUIRED)
 pkg_search_module(JEMALLOC REQUIRED jemalloc)
 # jemalloc --
 
-set(Debug_compile_opt "-DDEBUG -g -fsanitize=address")
-set(Debug_link "-fsanitize=address -lnuma")
-set(Release_compile_opt "-O3")
-set(Release_link "-lnuma")
+
+# -- Debug Compile Options -- #
+set(Debug_compile_opt -DDEBUG -O3 -g -fsanitize=address -fsanitize=undefined)
+set(Debug_link -fsanitize=address -lnuma -fsanitize=undefined -fsanitize=address -static-libasan)
+
+
+# -- Release Compile Options -- #
+set(Release_compile_opt -O3)
+set(Release_link -lnuma)
 
 # ------------------- Automation -------------------- #
 # Function to create an executable and apply common settings
@@ -65,19 +69,11 @@ function(add_benchmark exec_name)
         target_link_libraries(${exec_name} ${Debug_link} ${JEMALLOC_LIBRARIES})
     else()  #release version
         target_compile_options(${exec_name} PUBLIC ${Release_compile_opt})
-        target_link_libraries(${exec_name} ${Release_link} ${JEMALLOC_LIBRARIES}) #include jemalloc in release version
+        target_link_libraries(${exec_name} ${Release_link} ${JEMALLOC_LIBRARIES})
     endif()
 endfunction()
 
 # -------------------  Benchmarks  ------------------- #
-
-# add_benchmark(EnqueueDequeue
-#     ${CMAKE_SOURCE_DIR}/src/benchmark/EnqueueDequeue.cpp   
-# )
-
-# add_benchmark(ProducerConsumer
-#     ${CMAKE_SOURCE_DIR}/src/benchmark/ProducerConsumer.cpp 
-# )
 
 add_benchmark(OneToMany
     ${CMAKE_SOURCE_DIR}/src/benchmark/oneToMany.cpp 
@@ -126,32 +122,35 @@ target_compile_options(timeArray PUBLIC -O3)
 
 # -------------------  Testing  ------------------- #
 
-# set(HEADER_DIRS
-#     ${CMAKE_SOURCE_DIR}/include/queues/
-#     ${CMAKE_SOURCE_DIR}/include/utils    
-# )
+set(HEADER_DIRS
+    ${CMAKE_SOURCE_DIR}/include/queues/
+    ${CMAKE_SOURCE_DIR}/include/utils    
+)
 
-# add_executable(ConcurrentTests 
-#     ${CMAKE_SOURCE_DIR}/src/test/Concurrent.cpp
-# )
-# add_executable(SequentialTests
-#     ${CMAKE_SOURCE_DIR}/src/test/Sequential.cpp
-# )
+add_executable(ConcurrentTests 
+    ${CMAKE_SOURCE_DIR}/src/test/Concurrent.cpp
+)
+add_executable(SequentialTests
+    ${CMAKE_SOURCE_DIR}/src/test/Sequential.cpp
+)
 
-# add_subdirectory(include/googletest)
-# set(GTEST_DIR ${CMAKE_SOURCE_DIR}/include/googletest/googletest/include)
+add_subdirectory(include/googletest)
+set(GTEST_DIR ${CMAKE_SOURCE_DIR}/include/googletest/googletest/include)
 
-# target_precompile_headers(SequentialTests PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
-# target_precompile_headers(SequentialTests PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
+target_precompile_headers(SequentialTests PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
+target_precompile_headers(SequentialTests PRIVATE ${CMAKE_SOURCE_DIR}/include/queues/QueueTypeSet.hpp)
 
-# target_include_directories(ConcurrentTests PRIVATE ${HEADER_DIRS} ${GTEST_DIR})
-# target_include_directories(SequentialTests PRIVATE ${HEADER_DIRS} ${GTEST_DIR})
+target_include_directories(ConcurrentTests PRIVATE ${HEADER_DIRS} ${GTEST_DIR})
+target_include_directories(SequentialTests PRIVATE ${HEADER_DIRS} ${GTEST_DIR})
 
-# target_compile_options(ConcurrentTests PUBLIC  -O3 -g -fsanitize=address)
-# target_compile_options(SequentialTests PUBLIC  -O3 -g -fsanitize=address)
+target_compile_options(ConcurrentTests PUBLIC  -O3 -g -fsanitize=address)
+target_compile_options(SequentialTests PUBLIC  -O3 -g -fsanitize=address)
 
-# target_link_libraries(ConcurrentTests gtest gtest_main pthread -fsanitize=address)
-# target_link_libraries(SequentialTests gtest gtest_main pthread -fsanitize=address)
+target_compile_definitions(ConcurrentTests PUBLIC DISABLE_POW2)
+target_compile_definitions(SequentialTests PUBLIC DISABLE_POW2)
+
+target_link_libraries(ConcurrentTests gtest gtest_main pthread -fsanitize=address)
+target_link_libraries(SequentialTests gtest gtest_main pthread -fsanitize=address)
 
 enable_testing()
 add_test(NAME Sequential COMMAND SequentialTests)

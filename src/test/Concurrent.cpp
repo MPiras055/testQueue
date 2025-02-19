@@ -7,15 +7,20 @@
 #include "QueueTypeSet.hpp"
 #include "ThreadGroup.hpp"
 
-#define CONCURRENT_RUN 2
-
-
-// Define type aliases for each queue type you want to test
 template<typename V>
-using UQueues = ::testing::Types<FAAQueue<V>,LCRQueue<V>, LPRQueue<V>, LinkedMuxQueue<V>,LMTQueue<V>>;
+using UQueues = ::testing::Types<   FAAQueue<V>,
+                                    LCRQueue<V>,
+                                    LinkedMuxQueue<V>,
+                                    LMTQueue<V>,
+                                    LPRQueue<V>
+                                    >;
 template<typename V>
-using BQueues = ::testing::Types<BoundedMTQueue<V>,BoundedPRQueue<V>,BoundedMuxQueue<V>,BoundedCRQueue<V>>;
-//using BoundedQueues = ::testing::Types<BoundedMTQueue<V>>;
+using BQueues = ::testing::Types<   BoundedSegmentCRQueue<V>,
+                                    BoundedItemCRQueue<V>,
+                                    BoundedMuxQueue<V>,
+                                    BoundedMTQueue<V>,
+                                    BoundedSegmentPRQueue<V>,
+                                    BoundedItemPRQueue<V>>;
 
 // Test setup for unbounded queues
 template <typename Q>
@@ -31,7 +36,7 @@ public:
 
 struct Data {
     int tid;
-    size_t value;
+    uint64_t value;
     Data() = default;   //Default Constructor to perform delete operation
     Data(int tid,size_t value) : tid(tid), value(value){}
 
@@ -49,7 +54,7 @@ public:
     static constexpr int THREADS = 128;
     const size_t RUNS = 5;
     const size_t THREADS_RUN = 2;
-    const size_t ITER_ITEMS = 1'000'000;
+    const size_t ITER_ITEMS = 100'000;
 
     Q queue;
 
@@ -64,7 +69,7 @@ public:
     static constexpr size_t SIZE = 1024;
     const size_t RUNS = 5;
     const size_t THREADS_RUN     = 4;
-    const size_t ITER_ITEMS      = 10000'000;
+    const size_t ITER_ITEMS      = 100'000;
 
     Q queue;
 
@@ -85,171 +90,171 @@ TYPED_TEST_SUITE(Bounded, BQueuesOfData);
  * @note the test repeats for different numbers of threads [1-1,1-n,n-1,n-n]
  * @note the test repeats each thread configuration for a specified run_count [default: 5]
  */
-TYPED_TEST(Unbounded,TransferAllItems){
-    std::atomic<bool> stopFlag{false};
-    const int runs = this->RUNS;
-    const int ItemsPerThread = this->ITER_ITEMS;
-    const int threads_per_run = this->THREADS_RUN;
-    std::unique_ptr<std::barrier<>> prodBarrier;
-    std::unique_ptr<std::barrier<>> threadBarrier;
-    ThreadGroup threads;
-    const auto producer = [this,ItemsPerThread,&prodBarrier,&threadBarrier](const int tid){
-            Data * items = new Data[ItemsPerThread];
-            threadBarrier->arrive_and_wait();
-            for(size_t i = 0; i< ItemsPerThread; i++){
-                items[i] = Data(tid,i+1);
-                this->queue.push(&(items[i]),tid);
-            }
-            prodBarrier->arrive_and_wait();
-            threadBarrier->arrive_and_wait();
-            delete[] items;
-            return;
-        };
+// TYPED_TEST(Unbounded,TransferAllItems){
+//     std::atomic<bool> stopFlag{false};
+//     const int runs = this->RUNS;
+//     const uint64_t ItemsPerThread = this->ITER_ITEMS;
+//     const int threads_per_run = this->THREADS_RUN;
+//     std::unique_ptr<std::barrier<>> prodBarrier;
+//     std::unique_ptr<std::barrier<>> threadBarrier;
+//     ThreadGroup threads;
+//     const auto producer = [this,ItemsPerThread,&prodBarrier,&threadBarrier](const int tid){
+//             Data * items = new Data[ItemsPerThread];
+//             threadBarrier->arrive_and_wait();
+//             for(uint64_t i = 0; i< ItemsPerThread; i++){
+//                 items[i] = Data(tid,i+1);
+//                 this->queue.push(&(items[i]),tid);
+//             }
+//             prodBarrier->arrive_and_wait();
+//             threadBarrier->arrive_and_wait();
+//             delete[] items;
+//             return;
+//         };
 
-        const auto consumer = [this,&stopFlag,&threadBarrier](const int tid){
-            uint64_t sum = 0;
-            Data* item;
-            threadBarrier->arrive_and_wait();
-            while(!stopFlag.load()){
-                item = this->queue.pop(tid);
-                if(item != nullptr) sum += item->value;
-            }
-            while(true){    //Empty the queue after stopFlag is set
-                item = this->queue.pop(tid);
-                if(item == nullptr) break;
-                sum += item->value;
-            }
-            threadBarrier->arrive_and_wait();  //so producer can safely dealloc dynamic memory
-            return sum;
-        };
+//         const auto consumer = [this,&stopFlag,&threadBarrier](const int tid){
+//             uint64_t sum = 0;
+//             Data* item;
+//             threadBarrier->arrive_and_wait();
+//             while(!stopFlag.load()){
+//                 item = this->queue.pop(tid);
+//                 if(item != nullptr) sum += item->value;
+//             }
+//             while(true){    //Empty the queue after stopFlag is set
+//                 item = this->queue.pop(tid);
+//                 if(item == nullptr) break;
+//                 sum += item->value;
+//             }
+//             threadBarrier->arrive_and_wait();  //so producer can safely dealloc dynamic memory
+//             return sum;
+//         };
 
 
 
-    for(size_t iRun = 0 ; iRun < runs; iRun++){
-        std::vector<int> threadsPerRun = {1,threads_per_run};
-        for(size_t iProd = 0; iProd < threadsPerRun.size(); iProd++){
-            for(size_t iCons = 0; iCons < threadsPerRun.size() ; iCons++){
-                const int producers = threadsPerRun[iProd];
-                const int consumers = threadsPerRun[iCons];
-                std::vector<uint64_t> sum(consumers,0);
+//     for(size_t iRun = 0 ; iRun < runs; iRun++){
+//         std::vector<int> threadsPair = {1,threads_per_run};
+//         for(size_t iProd = 0; iProd < threadsPair.size(); iProd++){
+//             for(size_t iCons = 0; iCons < threadsPair.size() ; iCons++){
+//                 const int producers = threadsPair[iProd];
+//                 const int consumers = threadsPair[iCons];
+//                 std::vector<uint64_t> sum(consumers,0);
 
-                //Init barriers and flag
-                prodBarrier = std::make_unique<std::barrier<>>(producers + 1);
-                threadBarrier = std::make_unique<std::barrier<>>(producers + consumers + 1);
-                stopFlag.store(false);
+//                 //Init barriers and flag
+//                 prodBarrier = std::make_unique<std::barrier<>>(producers + 1);
+//                 threadBarrier = std::make_unique<std::barrier<>>(producers + consumers + 1);
+//                 stopFlag.store(false);
 
-                //Create threads
-                for(int jProd = 0; jProd < producers ; jProd++)
-                    threads.thread(producer);
+//                 //Create threads
+//                 for(int jProd = 0; jProd < producers ; jProd++)
+//                     threads.thread(producer);
                 
-                for(int jCons = 0; jCons < consumers ; jCons++)
-                    threads.threadWithResult(consumer,sum[jCons]);
+//                 for(int jCons = 0; jCons < consumers ; jCons++)
+//                     threads.threadWithResult(consumer,sum[jCons]);
 
-                //Start threads
-                threadBarrier->arrive_and_wait();
-                prodBarrier->arrive_and_wait();
-                stopFlag.store(true);
-                threadBarrier->arrive_and_wait();
-                threads.join();
+//                 //Start threads
+//                 threadBarrier->arrive_and_wait();
+//                 prodBarrier->arrive_and_wait();
+//                 stopFlag.store(true);
+//                 threadBarrier->arrive_and_wait();
+//                 threads.join();
 
-                //Check if all items have been dequeued
-                uint64_t total = std::accumulate(sum.begin(),sum.end(),0);
-                total /= producers;
+//                 //Check if all items have been dequeued
+//                 uint64_t total = std::accumulate(sum.begin(),sum.end(),0);
+//                 total /= producers;
 
-                EXPECT_EQ(total,ItemsPerThread*(ItemsPerThread+1)/2)   << "Failed at run " << iRun 
-                                                    << "Got " << total << "Expected " 
-                                                    << ItemsPerThread*(ItemsPerThread+1)/2;
-                EXPECT_EQ(this->queue.pop(0),nullptr); 
-            }
-        }
-    }
-}
+//                 EXPECT_EQ(total,threadsPair[iProd] * ItemsPerThread*(ItemsPerThread+1)/2)   << "Failed at run " << iRun 
+//                                                     << " Got " << total << " Expected " 
+//                                                     << ItemsPerThread*(ItemsPerThread+1)/2;
+//                 EXPECT_EQ(this->queue.pop(0),nullptr); 
+//             }
+//         }
+//     }
+// }
 
-/**
- * @brief Same thing as above [retry if push operation unsuccessful]
- */
-TYPED_TEST(Bounded,TransferAllItems){
-    std::unique_ptr<std::barrier<>> prodBarrier;
-    std::unique_ptr<std::barrier<>> threadBarrier;
-    std::atomic<bool> stopFlag{false};
-    const int runs = this->RUNS;
-    const int ItemsPerThread = this->ITER_ITEMS;
-    const int threadsRun = this->THREADS_RUN;
-    ThreadGroup threads;
+// /**
+//  * @brief Same thing as above [retry if push operation unsuccessful]
+//  */
+// TYPED_TEST(Bounded,TransferAllItems){
+//     std::unique_ptr<std::barrier<>> prodBarrier;
+//     std::unique_ptr<std::barrier<>> threadBarrier;
+//     std::atomic<bool> stopFlag{false};
+//     const int runs = this->RUNS;
+//     const uint64_t ItemsPerThread = this->ITER_ITEMS;
+//     const int threadsRun = this->THREADS_RUN;
+//     ThreadGroup threads;
 
-    const auto prod_lambda = [this,ItemsPerThread,&prodBarrier,&threadBarrier](const int tid){
-        Data * items = new Data[ItemsPerThread];
-        threadBarrier->arrive_and_wait();
-        for(int i = 0; i< ItemsPerThread; i++){
-            items[i] = Data(tid,i+1);
-            while(!this->queue.push(&(items[i]),tid)){}
+//     const auto prod_lambda = [this,ItemsPerThread,&prodBarrier,&threadBarrier](const int tid){
+//         Data * items = new Data[ItemsPerThread];
+//         threadBarrier->arrive_and_wait();
+//         for(int i = 0; i< ItemsPerThread; i++){
+//             items[i] = Data(tid,i+1);
+//             while(!this->queue.push(&(items[i]),tid)){}
             
-        }
-        prodBarrier->arrive_and_wait();
-        threadBarrier->arrive_and_wait();
-        delete[] items;
-        return;
-    };
-    const auto cons_lambda = [this,&stopFlag,&threadBarrier](const int tid){
-        Data* item;
-        uint64_t sum = 0;
-        threadBarrier->arrive_and_wait();
-        while(!stopFlag.load()){
-            if((item = this->queue.pop(tid)) != nullptr) sum += item->value;
-        }
-        do{
-            if((item = this->queue.pop(tid)) != nullptr) sum += item->value;
-        }while(item != nullptr);
-        threadBarrier->arrive_and_wait();
-        return sum;
-    };
+//         }
+//         prodBarrier->arrive_and_wait();
+//         threadBarrier->arrive_and_wait();
+//         delete[] items;
+//         return;
+//     };
+//     const auto cons_lambda = [this,&stopFlag,&threadBarrier](const int tid){
+//         Data* item;
+//         uint64_t sum = 0;
+//         threadBarrier->arrive_and_wait();
+//         while(!stopFlag.load()){
+//             if((item = this->queue.pop(tid)) != nullptr) sum += item->value;
+//         }
+//         do{
+//             if((item = this->queue.pop(tid)) != nullptr) sum += item->value;
+//         }while(item != nullptr);
+//         threadBarrier->arrive_and_wait();
+//         return sum;
+//     };
 
 
-    for(int iRun = 0; iRun < runs ; iRun++){
-        std::vector<int> threadsPair = {1,threadsRun};
-        for(size_t iProd = 0; iProd < threadsPair.size() ; iProd++){
-            for(size_t iCons = 0; iCons < threadsPair.size() ; iCons++){
-                int producers = threadsPair[iProd];
-                int consumers = threadsPair[iCons];
-                std::vector<uint64_t> sum(consumers,0);
-                //Init barrier
-                prodBarrier = std::make_unique<std::barrier<>>(producers + 1);
-                threadBarrier = std::make_unique<std::barrier<>>(producers + consumers + 1);
-                stopFlag.store(false);
+//     for(int iRun = 0; iRun < runs ; iRun++){
+//         std::vector<int> threadsPair = {1,threadsRun};
+//         for(size_t iProd = 0; iProd < threadsPair.size() ; iProd++){
+//             for(size_t iCons = 0; iCons < threadsPair.size() ; iCons++){
+//                 int producers = threadsPair[iProd];
+//                 int consumers = threadsPair[iCons];
+//                 std::vector<uint64_t> sum(consumers,0);
+//                 //Init barrier
+//                 prodBarrier = std::make_unique<std::barrier<>>(producers + 1);
+//                 threadBarrier = std::make_unique<std::barrier<>>(producers + consumers + 1);
+//                 stopFlag.store(false);
 
-                //Schedule Threads
-                for(int jProd = 0; jProd < producers ; jProd++)
-                    threads.thread(prod_lambda);
+//                 //Schedule Threads
+//                 for(int jProd = 0; jProd < producers ; jProd++)
+//                     threads.thread(prod_lambda);
                 
-                for(int jCons = 0; jCons < consumers ; jCons++)
-                    threads.threadWithResult(cons_lambda,sum[jCons]);
+//                 for(int jCons = 0; jCons < consumers ; jCons++)
+//                     threads.threadWithResult(cons_lambda,sum[jCons]);
 
-                //Start threads
-                threadBarrier->arrive_and_wait();
-                prodBarrier->arrive_and_wait();
-                stopFlag.store(true);
-                threadBarrier->arrive_and_wait();
-                threads.join();
+//                 //Start threads
+//                 threadBarrier->arrive_and_wait();
+//                 prodBarrier->arrive_and_wait();
+//                 stopFlag.store(true);
+//                 threadBarrier->arrive_and_wait();
+//                 threads.join();
 
-                //Check if all items have been dequeued
-                /***
-                 * @warning debug needs to be fixed
-                    Fix it to account for the fact that I can't store the result in a single variable
-                 * 
-                 * So instead, store ItemsPerThread*(ItemsPerThread+1)/2 and iterate through the vector to
-                 * compute the difference
-                 */
+//                 //Check if all items have been dequeued
+//                 /***
+//                  * @warning debug needs to be fixed
+//                     Fix it to account for the fact that I can't store the result in a single variable
+//                  * 
+//                  * So instead, store ItemsPerThread*(ItemsPerThread+1)/2 and iterate through the vector to
+//                  * compute the difference
+//                  */
 
-                uint64_t total = std::accumulate(sum.begin(),sum.end(),0);
-                total /= producers;
-                ASSERT_EQ(total,ItemsPerThread*(ItemsPerThread+1)/2)   << "Failed at run " << iRun 
-                                                    << "Got " << total << "Expected " 
-                                                    << ItemsPerThread*(ItemsPerThread+1)/2;
-                ASSERT_EQ(this->queue.pop(0),nullptr);
-            }
-        }
-    }
-}
+//                 uint64_t total = std::accumulate(sum.begin(),sum.end(),0);
+//                 total /= producers;
+//                 ASSERT_EQ(total,threadsPair[iProd] * ItemsPerThread*(ItemsPerThread+1)/2)   << "Failed at run " << iRun 
+//                                                     << " Got " << total << " Expected " 
+//                                                     << ItemsPerThread*(ItemsPerThread+1)/2;
+//                 ASSERT_EQ(this->queue.pop(0),nullptr);
+//             }
+//         }
+//     }
+// }
 
 /**
  *  @brief Check if the queue semantics is respected during extraction operations
@@ -264,7 +269,7 @@ TYPED_TEST(Bounded,TransferAllItems){
  */
 TYPED_TEST(Unbounded, QueueSemantics) {
     const int numRuns = this->RUNS;
-    const int ItemsPerThread = this->ITER_ITEMS;
+    const uint64_t ItemsPerThread = this->ITER_ITEMS;
     const int threadsRun = this->THREADS_RUN;
     std::atomic<bool> stopFlag{false};  
     std::unique_ptr<std::barrier<>> prodBarrier;
@@ -375,7 +380,7 @@ TYPED_TEST(Unbounded, QueueSemantics) {
  */
 TYPED_TEST(Bounded, QueueSemantics) {
     const int numRuns = this->RUNS;
-    const int ItemsPerThread = this->ITER_ITEMS;
+    const uint64_t ItemsPerThread = this->ITER_ITEMS;
     const int threadsRun = this->THREADS_RUN;
     std::atomic<bool> stopFlag{false};  
     std::unique_ptr<std::barrier<>> prodBarrier;

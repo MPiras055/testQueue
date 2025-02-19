@@ -6,9 +6,19 @@
  * Type aliases for queue definition
  */
 template<typename V>
-using UQueues = ::testing::Types<FAAQueue<V>,LCRQueue<V>, LPRQueue<V>, LinkedMuxQueue<V>,LMTQueue<V>>;
+using UQueues = ::testing::Types<   FAAQueue<V>,
+                                    LCRQueue<V>,
+                                    LinkedMuxQueue<V>,
+                                    LMTQueue<V>,
+                                    LPRQueue<V>
+                                    >;
 template<typename V>
-using BQueues = ::testing::Types<BoundedMTQueue<V>,BoundedPRQueue<V>,BoundedMuxQueue<V>,BoundedCRQueue<V>>;
+using BQueues = ::testing::Types<   BoundedSegmentCRQueue<V>,
+                                    BoundedItemCRQueue<V>,
+                                    BoundedMuxQueue<V>,
+                                    BoundedMTQueue<V>,
+                                    BoundedSegmentPRQueue<V>,
+                                    BoundedItemPRQueue<V>>;
 
 template<typename Q>
 class UnboundedSequential : public ::testing::Test {
@@ -39,14 +49,14 @@ TYPED_TEST_SUITE(BoundedSequential,BQueues<int>);
  * @brief Checks if the queue is initialized correctly as empty and with length 0
  */
 TYPED_TEST(UnboundedSequential,Initialization){
-    int tid = 0;
-    EXPECT_EQ(this->queue.length(tid),0);
+    const int tid = 0;
+    EXPECT_EQ(this->queue.length(std::move(tid)),0ull);
     for(size_t i = 0; i< this->queue.capacity() * 2; ++i){
         EXPECT_EQ(this->queue.pop(tid),nullptr);
     }
 }
 TYPED_TEST(BoundedSequential,Initialization){
-    int tid = 0;
+    const int tid = 0;
     EXPECT_EQ(this->queue.length(tid),0);
     for(size_t i = 0; i< this->queue.capacity() * 2; ++i){
         EXPECT_EQ(this->queue.pop(tid),nullptr);
