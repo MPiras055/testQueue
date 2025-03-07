@@ -5,13 +5,15 @@
 #include "Segment.hpp"
 #include "RQCell.hpp"
 
+
 #ifndef CACHE_LINE
-#define CACHE_LINE 64
+#define CACHE_LINE 64ul
 #endif
 
 template<class T, class Segment>
 class BoundedSegmentAdapter {
 private:
+
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
     static constexpr size_t MAX_SEGMENTS = 4;
     static constexpr int kHpTail = 0;
@@ -28,32 +30,36 @@ private:
     alignas(CACHE_LINE) std::atomic<uint64_t> segmentTailIdx;
 
     /**
-     * upon failed push each thread sets the skip_push variable that gets reset when the current segment
+     * upon failed push each thread sets the check_push variable that gets reset when the current segment
      * is changed. If the segment remains the same, before attempting further push it's checked if the current
      * segment is closed
      * 
      * @note mantains its state between push/pops operations
      */
-    alignas(CACHE_LINE) static inline thread_local bool skip_push = false;
+    alignas(CACHE_LINE) static inline thread_local bool check_push = false;
 
     HazardPointers<Segment> HP;
 
 public:
-    BoundedSegmentAdapter(size_t size_par, size_t threads = MAX_THREADS, size_t segmentCount = 4):
-    maxSegments{segmentCount},
+    BoundedSegmentAdapter(size_t size_par, size_t threads = MAX_THREADS, size_t segmentCount = MAX_SEGMENTS):
 #ifndef DISABLE_POW2
-    sizeRing{(detail::isPowTwo(size_par)? size_par : detail::nextPowTwo(size_par)) / maxSegments},
+    maxSegments{segmentCount > 1 && detail::isPowTwo(segmentCount)? segmentCount : detail::nextPowTwo(segmentCount)},
+    sizeRing{( detail::isPowTwo(size_par)? size_par : detail::nextPowTwo(size_par)) / maxSegments},
 #else 
     sizeRing{size_par},
+    maxSegments{segmentCount},
 #endif
     maxThreads{threads},
     fullLength{sizeRing * maxSegments},
     HP(2,maxThreads)
     {
+#ifdef DEBUG
 #ifndef DISABLE_HAZARD
-        assert(maxThreads <= MAX_THREADS);
+    assert(maxThreads <= MAX_THREADS);
 #endif
-        assert(sizeRing > 0);
+    assert(sizeRing != 0);
+    assert(maxSegments != 0);
+#endif
 
         Segment* sentinel = new Segment(sizeRing);
         head.store(sentinel, std::memory_order_relaxed);
@@ -74,19 +80,18 @@ public:
 
 
     __attribute__((used,always_inline)) bool push(T* item, int tid) {
-        Segment* ltail = HP.protect(kHpTail, tail.load(), tid);
+        Segment* ltail = HP.protectRelease(kHpTail, tail.load(std::memory_order_acquire), tid);
         while (true) {
-
 #ifndef DISABLE_HP
             //check for tail inconsistency
             /**
-             * updates protection on the current global head
+             * updates protectReleaseion on the current global head
              * if it's changed after last cycle
              */
-            Segment* ltail2 = tail.load();
+            Segment* ltail2 = tail.load(std::memory_order_acquire);
             if (ltail2 != ltail) {
-                skip_push = false;
-                ltail = HP.protect(kHpTail, ltail2, tid);
+                check_push = false;
+                ltail = HP.protectRelease(kHpTail, ltail2, tid);
                 continue;
             }
 #endif
@@ -94,38 +99,39 @@ public:
             /**
              * if a new segment is present then it tries to advance the global head
              */
-            Segment *lnext = ltail->next.load();
+            Segment *lnext = ltail->next.load(std::memory_order_acquire);
             //advance the global head
             if (lnext != nullptr) {
-                if(tail.compare_exchange_strong(ltail, lnext)){
-                    ltail = HP.protect(kHpTail, lnext, tid);
+                if(tail.compare_exchange_strong(ltail, lnext,std::memory_order_acq_rel)){
+                    ltail = HP.protectRelease(kHpTail, lnext, tid);
                 }
                 else{
-                    ltail = HP.protect(kHpTail, tail.load(), tid);
+                    ltail = HP.protectRelease(kHpTail, tail.load(std::memory_order_acquire), tid);
                 }
-                skip_push = false;  //is segment is changed then we perform an "exploratory" push
+                check_push = false;  //is segment is changed then we perform an "exploratory" push
                 continue;
             }
             
             /**
-             * If skip_push is set to true we don't perform push operation if the current segment is closed
+             * If check_push is set to true we don't perform push operation if the current segment is closed
              * 
-             * If the push operation on the current segment fails then skip_push is set to true until the segment
+             * If the push operation on the current segment fails then check_push is set to true until the segment
              * reference is changed (via segment update) 
              */
 
-            if(skip_push)
-                skip_push = ltail->isClosed();
+            if(check_push) check_push = ltail->isClosed();
 
-            if(!skip_push){
+            if(!check_push){
                 if(ltail->push(item,tid)){
                     HP.clear(kHpTail,tid);
                     return true;
-                } else skip_push = true;
+                } else check_push = true;
             }
             
+            // checks if the following allocation doesn't exceed the max limit [set by acquire_release]
+            if(ltail->next.load(std::memory_order_relaxed) != nullptr)
+                continue;
 
-            // checks if the following allocation doesn't exceed the max limit
             if(segmentCount() >= maxSegments){
                 HP.clear(kHpTail,tid);
                 return false;
@@ -137,81 +143,74 @@ public:
             Segment* nullNode = nullptr;
 
             //The segment update is not made in mutual exclusion to ensure performance (the memory bound increases)
-            if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
-                tail.compare_exchange_strong(ltail, newTail);
+            if (ltail->next.compare_exchange_strong(nullNode, newTail, std::memory_order_acq_rel)) {
+                tail.compare_exchange_strong(ltail, newTail, std::memory_order_acq_rel);
                 segmentTailIdx.fetch_add(1,std::memory_order_release);
-                skip_push = false;
+                check_push = false;
                 HP.clear(kHpTail, tid);
                 return true;
             }
 
             delete newTail;
-            ltail = HP.protect(kHpTail, nullNode, tid);
-            skip_push = false;
+            ltail = HP.protectRelease(kHpTail, nullNode, tid);
+            check_push = false;
         }
     }
 
-        __attribute__((used,always_inline)) T* pop(int tid) {
-        Segment* lhead = HP.protect(kHpHead, head.load(), tid);
+    __attribute__((used,always_inline)) T* pop(int tid) {
+        Segment* lhead = HP.protectRelease(kHpHead, head.load(std::memory_order_acquire), tid);
+
+        T* item = nullptr;
         while (true) {
 #ifndef DISABLE_HP
             //check for head inconsistency
-            Segment* lhead2 = head.load();
+            Segment* lhead2 = head.load(std::memory_order_acquire);
             if (lhead2 != lhead) {
-                lhead = HP.protect(kHpHead, lhead2, tid);
+                lhead = HP.protectRelease(kHpHead, lhead2, tid);
                 continue;
             }
 #endif
             //try to pop from the current segment
-            T* item = lhead->pop(tid);
-            if (item != nullptr){
-                HP.clear(kHpHead, tid);
-                return item;
-                
-            }
+            if (item = lhead->pop(tid); item != nullptr) break;
 
-            Segment* lnext = lhead->next.load();
-            if (lnext != nullptr){
-                item = lhead->pop(tid);
-                if (item == nullptr) {
-                    //When changing head segment
-                    if (head.compare_exchange_strong(lhead, lnext)) {
-                        segmentHeadIdx.fetch_add(1,std::memory_order_release);
-                        HP.retire(lhead, tid);
-                        lhead = HP.protect(kHpHead, lnext, tid);
-                    } else {  
-                        lhead = HP.protect(kHpHead, lhead, tid); 
-                    }  
-                    continue;
-                }
+            Segment* lnext = lhead->next.load(std::memory_order_acquire);
+            if (lnext == nullptr) break;
 
-                HP.clear(kHpHead, tid);
-                return item;
-            }
+            if (item = lhead->pop(tid); item != nullptr) break;
             
-            //queue apperas empty
-            HP.clear(kHpHead, tid);
-            return nullptr;       
+            //When changing head segment
+            if (head.compare_exchange_strong(lhead, lnext, std::memory_order_acq_rel)) {
+                segmentHeadIdx.fetch_add(1,std::memory_order_release);
+                HP.retire(lhead, tid);
+                lhead = HP.protectRelease(kHpHead, lnext, tid);
+            } else
+                lhead = HP.protectRelease(kHpHead, lhead, tid); 
+            
+            
         }
+
+        //queue appears empty
+        HP.clear(kHpHead, tid);
+        return item;    
     }
 
     size_t length([[maybe_unused]] const int tid = 0) {
-        Segment *lhead = HP.protect(kHpHead,head,tid);
-        Segment *ltail = HP.protect(kHpTail,tail,tid);
-        uint64_t t = ltail->getTailIndex();
-        uint64_t h = lhead->getHeadIndex();
+        Segment *lhead = HP.protectRelease(kHpHead,head,tid);
+        Segment *ltail = HP.protectRelease(kHpTail,tail,tid);
+        uint64_t t = ltail->tailIndex();
+        uint64_t h = lhead->headIndex();
         HP.clear(tid);
         return t > h ? t - h : 0;
     }
 
     inline size_t capacity() const {
-        return fullLength;
+        return sizeRing * maxSegments;
     }
 
 private:
     __attribute__((used,always_inline)) inline size_t segmentCount() const {
         //if the threads are on the same segments we still count one segment allocated
-        return segmentTailIdx.load(std::memory_order_relaxed) - segmentHeadIdx.load(std::memory_order_relaxed) + 1;
+        return segmentTailIdx.load(std::memory_order_acquire) - segmentHeadIdx.load(std::memory_order_acquire) + 1;
     }
 
 };

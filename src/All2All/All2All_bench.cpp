@@ -48,6 +48,7 @@ struct threadShared {
     size_t producers;
     size_t consumers;
     size_t items;
+    size_t prod_cons;
     std::barrier<>* threadsBarrier = nullptr;                   //all threads + main
     std::barrier<>* producersBarrier = nullptr;                 //only producers + main
     std::barrier<>* consumersBarrier = nullptr;                 //only consumers + main
@@ -66,7 +67,7 @@ void producer_routine(All2All<Data> &queue, size_t items, threadShared &sharedAr
 
 void consumer_routine(All2All<Data> &queue, threadShared &sharedArgs, const int tid);
 
-long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude);
+long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude, size_t prod_cons);
 
 
 
@@ -74,8 +75,12 @@ long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size
 
 int main(int argc, char **argv) {
     
-    if(argc != 7){
-        std::cerr << "Usage: " << argv[0] << " <producers> <consumers> <size_queue> <items> <rand_center> <rand_amplitude>" << std::endl;
+    size_t prod_cons = 0;
+
+    if(argc == 9)
+        prod_cons = std::stoul(argv[8]);
+    else if(argc != 8){
+        std::cerr << "Usage: " << argv[0] << " <producers> <consumers> <size_queue> <items> <rand_center> <rand_amplitude> <prod_cons: default = 0>" << std::endl;
         return 1;
     }
 
@@ -97,13 +102,13 @@ int main(int argc, char **argv) {
 #ifdef DEBUG
             "DEBUG: " <<
 #endif
-            benchmark(producers,consumers, sizeQueue, duration, center, amplitude) << std::endl;
+            benchmark(producers,consumers, sizeQueue, duration, center, amplitude,prod_cons) << std::endl;
             
             return 0;
         
 }
 
-long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude){
+long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size_t items,size_t center,size_t amplitude, size_t prod_cons){
     if(producers == 0 || consumers == 0 || sizeQueue == 0 || items == 0){
         std::cerr << "Error: Invalid null arguments" << std::endl;
         exit(1);
@@ -127,6 +132,7 @@ long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size
     sharedArgs.stopFlag = &stopFlag;
     sharedArgs.center = center;
     sharedArgs.amplitude = amplitude;
+    sharedArgs.prod_cons = prod_cons;
 
 
     //load balance for producers
@@ -195,7 +201,7 @@ long double benchmark(size_t producers, size_t consumers, size_t sizeQueue, size
      * if the numa optimization isn't disabled then we
      */
 #ifndef DISABLE_AFFINITY
-    NumaDispatcher dispatcher(CACHE_LEVEL);
+    Dispatcher dispatcher(CACHE_LEVEL);
     /**
      * The dispatchment is done prioritizing filling cluster in a fair way between
      * producers and consumers (ratio based pinning). The threads are also dispatched
@@ -258,7 +264,7 @@ void producer_routine(All2All<Data> &queue, size_t items, threadShared &sharedAr
     sharedArgs.threadsBarrier->arrive_and_wait(); //wait for main to set affinity
 
 #ifndef DISABLE_AFFINITY    //if affinity has been set
-    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    (*sharedArgs.threadCluster)[tid] = Dispatcher::get_numa_node();
     sharedArgs.threadsBarrier->arrive_and_wait();
 #endif
 
@@ -273,8 +279,8 @@ void producer_routine(All2All<Data> &queue, size_t items, threadShared &sharedAr
     const size_t producers = sharedArgs.producers;
     sharedArgs.threadsBarrier->arrive_and_wait();
     for(size_t i = 0; i < items; i++){
-
-        random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
+        if(sharedArgs.prod_cons != 2)
+            random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
                 
 #ifdef DEBUG    //use the item from the preallocated vector
         item = &((*(sharedArgs.itemsPerProducer))[tid][i]);
@@ -309,7 +315,7 @@ void consumer_routine(All2All<Data> &queue, threadShared &sharedArgs, const int 
     sharedArgs.threadsBarrier->arrive_and_wait(); //wait for main to set affinity
 
 #ifndef DISABLE_AFFINITY    //check with main that pinning was successful;
-    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    (*sharedArgs.threadCluster)[tid] = Dispatcher::get_numa_node();
     sharedArgs.threadsBarrier->arrive_and_wait();
 #endif
 
@@ -334,7 +340,7 @@ void consumer_routine(All2All<Data> &queue, threadShared &sharedArgs, const int 
             consumer_check(lastSeen,item);  //bound to fail if item out of order [else updates lastSeen]
         }
 #endif
-        if(item != nullptr) //RandomWork is done only if the item is extracted
+        if(sharedArgs.prod_cons != 1 && item != nullptr) //RandomWork is done only if the item is extracted
             random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
     }
 
@@ -348,7 +354,8 @@ void consumer_routine(All2All<Data> &queue, threadShared &sharedArgs, const int 
         }
 #endif
         if(item == nullptr) break;
-        random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
+        if(sharedArgs.prod_cons != 1)
+            random_work(center,amplitude);   //simulate random work [between minWait and maxWait]
     }while(true);
 
     sharedArgs.threadsBarrier->arrive_and_wait();  //notify main that consumers are done [stops the measure]

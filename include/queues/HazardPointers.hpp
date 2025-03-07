@@ -4,10 +4,11 @@
 #include <cassert>
 #include <vector>
 
+
 #ifndef DISABLE_HAZARD
 
 #ifndef CACHE_LINE
-#define CACHE_LINE 64
+#define CACHE_LINE 64ul
 #endif
 
 #ifndef HAZARD_MAX

@@ -96,7 +96,7 @@ def process_csv(outfile:str,unit: int = 20) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        sys.stderr.write("Usage: python3 memoryMonitor.py granularity outfile command...")
+        sys.stderr.write("Usage: python3 memoryMonitor.py granularity outfile command...\n")
         sys.exit(1)
     try:
         main(float(sys.argv[1]),sys.argv[2],sys.argv[3:])

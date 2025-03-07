@@ -1,8 +1,12 @@
 #pragma once
 
-#include "LinkedAdapter.hpp"
 #include "RQCell.hpp"
 #include "CacheRemap.hpp"
+#include "Segment.hpp"
+
+//Forward declaration for LinkedrAdapter
+template<typename T, class Segment>
+class LinkedAdapter; 
 
 #ifndef TRY_CLOSE_MTQ
 #define TRY_CLOSE_MTQ 10
@@ -26,10 +30,10 @@ private:
 
     Cell *array;
     const size_t sizeRing;
+    const size_t mask;
     [[no_unique_address]] const CacheRemap<sizeof(Cell), CACHE_LINE> remap;
-#ifndef DISABLE_POW2
-    const size_t mask;  //Mask to execute the modulo operation
-#endif
+
+
 public:
     /**
      * @brief Private Constructor for MTQueue segment
@@ -39,16 +43,26 @@ public:
      * @param start (uint64_t) start index of the segment [useful for LinkedRing Adaptation]
      * 
      * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
+     * 
+     * @details checks DISABLE_POW2 macro for the bounded version
      */
-    MTQueue(size_t size_par,[[maybe_unused]] const int tid, uint64_t start): Base(), 
+    MTQueue(size_t size_par,[[maybe_unused]] const int maxThreads = 0, uint64_t start = 0): Base(), 
 #ifndef DISABLE_POW2
-    sizeRing{detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
-    mask{sizeRing - 1},  //sets the mask to perform modulo operation
+    sizeRing{ size_par > 1 && detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
 #else
     sizeRing{size_par},
 #endif
-    remap(CacheRemap<sizeof(Cell), CACHE_LINE>(sizeRing)) //initialize the cache remap
+    mask{sizeRing - 1},
+    remap(sizeRing) //initialize the cache remap
     {
+#ifdef DEBUG
+#ifdef DISABLE_POW2
+        assert(sizeRing > 0);
+#else
+        assert(sizeRing > 1 && detail::isPowTwo(sizeRing));
+#endif
+#endif
+
         array = new Cell[sizeRing];
 
         //sets the fields of the Cell given the startingIndex (default 0)
@@ -62,21 +76,14 @@ public:
 #endif       
         }
 
-        Base::head.store(start,std::memory_order_relaxed);
-        Base::tail.store(start,std::memory_order_relaxed);
+        Base::setStartIndex(start);
     }
 
     /**
-     * @brief Constructor for MTQueue segment
+     * @brief Destructor
      * 
-     * @param size (size_t) size of the segment
-     * @param tid (int) thread id [not used]
-     * 
-     * @note the `tid` parameters is not used but is kept for compatibility with the LinkedAdapter
-     * @note calls the private constructor with start index set to 0
+     * Drains the segment and deallocates the underlying array
      */
-    MTQueue(size_t size,[[maybe_unused]] const int tid = 0): MTQueue(size,tid,0){} 
-
     ~MTQueue(){
         while(pop(0) != nullptr);
         delete[] array;
@@ -105,11 +112,13 @@ public:
         Cell *node;
         while(true){
             tailTicket = Base::tail.load(std::memory_order_relaxed);
+
             if constexpr (!bounded){ //check if queue is closed if unbounded
                 if(Base::isClosed(tailTicket)) {
                     return false;
                 } 
             }
+
 #ifndef DISABLE_POW2
             node = &(array[remap[tailTicket & mask]]);
 #else
@@ -117,28 +126,20 @@ public:
 #endif
             idx = node->idx.load(std::memory_order_acquire);
             if(tailTicket == idx){
-                if(Base::tail.compare_exchange_weak(tailTicket,tailTicket + 1,std::memory_order_relaxed)) //try to advance the index
+                if(Base::tail.compare_exchange_weak(tailTicket,tailTicket + 1, std::memory_order_relaxed)) //try to advance the index
                     break;
-                
-            } else {
-                if(tailTicket > idx){
-                    if constexpr (bounded){ //if queue is bounded then never closes the segment
-                        return false;
-                    }
-                    else{
-                        /**
-                         * sets the MSB of the tail index
-                         * 
-                         * @note -1 because ::closeSegment incremements ro account for FAA based queues
-                         */
-                        if (Base::closeSegment(tailTicket-1, ++try_close > TRY_CLOSE_MTQ)){
-                            return false;
-                        }
-                    }
-                }
-            }
 
-            backoff(delay); //delay for CAS retry
+                delay = backoff(delay); //delay for CAS retry
+
+            } else if(tailTicket > idx){
+                if constexpr (!bounded){ //if queue is bounded then never closes the segment
+                    if(Base::closeSegment(tailTicket - 1, ++try_close > TRY_CLOSE_MTQ))
+                        return false;
+                }
+                else{
+                    return false;
+                }   
+            }
         }
         node->val = item;
         node->idx.store((idx + 1),std::memory_order_release);
@@ -153,39 +154,41 @@ public:
      * @returns (T*) item popped from the queue [nullptr if the queue is empty]
      * @note uses exponential decay backoff
      */
-    __attribute__((used,always_inline)) T *pop([[maybe_unused]] const int tid){
+    __attribute__((used,always_inline)) T *pop ([[maybe_unused]] const int tid){
         unsigned long delay = __MTQ_MIN_DELAY;
-        size_t headTicket,idx;
+        size_t headTicket, idx;
         Cell *node;
         T* item;
 
         while(true){
             headTicket = Base::head.load(std::memory_order_relaxed);
+
 #ifndef DISABLE_POW2
             node = &(array[remap[headTicket & mask]]);
 #else
             node = &(array[remap[headTicket % sizeRing]]);
 #endif
+
             idx = node->idx.load(std::memory_order_acquire);
             long diff = idx - (headTicket + 1);
             if(diff == 0){
                 if(Base::head.compare_exchange_weak(headTicket,headTicket + 1,std::memory_order_relaxed)) //try to advance the head
                     break;
+                delay = backoff(delay); //delay for CAS retry
+                
             }
-            else if (diff < 0){ //check if queue is empty
-                if(Base::isEmpty()){
+            else if (diff < 0){
+                if(Base::isEmpty())
                     return nullptr;
-                }
             }
-
-            backoff(delay); //delay for CAS retry
         }
 
         item = node->val;
         node->idx.store(headTicket + sizeRing,std::memory_order_release);
         return item;
-    }
 
+    }
+    
     /**
      * @brief returns the length of the queue
      * 
@@ -197,12 +200,7 @@ public:
      * @warning the value returned could be an approximation.
      */
     inline size_t length([[maybe_unused]] const int tid = 0) const {
-        if constexpr (bounded){
-            int length = Base::tail.load(std::memory_order_acquire) - Base::head.load(std::memory_order_acquire);
-            return length > 0 ? length : 0;
-        } else {
-            return Base::length();
-        }
+        return Base::length();
     }
 
     /**
@@ -216,18 +214,22 @@ public:
     }
 
 private:
-
     /**
      * Private method to perform between-CAS delay
      */
-    __attribute__((used,always_inline)) void backoff(unsigned long currentDelay){
-        while(currentDelay-- != 0)
+    __attribute__((used,always_inline)) unsigned long backoff(unsigned long currentDelay){
+#ifdef DEBUG
+        assert(currentDelay >= __MTQ_MIN_DELAY && currentDelay <= __MTQ_MAX_DELAY); //in bounds check
+#endif
+        //Wait the current delay
+        while((currentDelay--) != 0)
             asm volatile("nop");    //busy waiting iterations
         
         //update the delay for next iteration
-        currentDelay = std::min(currentDelay << 1, __MTQ_MAX_DELAY);
-        return;
+        currentDelay = currentDelay << 1;
+        return currentDelay > __MTQ_MAX_DELAY ? __MTQ_MAX_DELAY : currentDelay;
     }
+
 
     friend class LinkedAdapter<T,MTQueue<T,padded_cells,bounded>>;   
 

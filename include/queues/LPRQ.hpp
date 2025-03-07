@@ -1,34 +1,42 @@
 #pragma once
 
-#include "LinkedAdapter.hpp"
-#include "BoundedSegmentAdapter.hpp"
-#include "BoundedItemAdapter.hpp"
+// #include "LinkedAdapter.hpp"
+// #include "BoundedSegmentAdapter.hpp"
+// #include "BoundedItemAdapter.hpp"
+
+#include "Segment.hpp"
+#include "CacheRemap.hpp"
 #include "RQCell.hpp"
+
+// Forward declarations for wrapper classes
+template <typename T, class Segment>
+class LinkedAdapter;
+template <typename T, class Segment>
+class BoundedSegmentAdapter;
+template <typename T, class Segment>
+class BoundedItemAdapter;
+
+
+#ifndef CACHE_LINE
+#define CACHE_LINE 64ul
+#endif
 
 // max retries for closing segment [assuming spurious fails]
 #ifndef TRY_CLOSE_PRQ
 #define TRY_CLOSE_PRQ 10
 #endif
 
-#ifndef CACHE_LINE
-#define CACHE_LINE 64
-#endif
-
 template<typename T,bool padded_cells>
 class PRQueue : public QueueSegmentBase<T, PRQueue<T,padded_cells>> {
 private:
+
     using Base = QueueSegmentBase<T,PRQueue<T,padded_cells>>;
     using Cell = detail::CRQCell<void*,padded_cells>;
 
     const size_t sizeRing;
-#ifndef DISABLE_POW2
-    const size_t mask;  //Mask to execute the modulo operation as bitwise AND
-#endif
+    const size_t mask;  //Mask for modulo as bitwise op
 
-    Cell* array; 
-    [[no_unique_address]] const CacheRemap<sizeof(Cell),CACHE_LINE> remap;
-
-    /**
+        /**
      * @brief Extracts the index from a given value [63 LSB]
      */
     inline uint64_t nodeIndex(uint64_t i) const {return (i & ~(1ull << 63));}
@@ -48,7 +56,7 @@ private:
      * 
      * @note a bottom pointer is defined as a pointer with LSB set to 1
      */
-    inline bool isBottom(void* const value) const { 
+    inline bool isReserved(void* const value) const { 
         return (reinterpret_cast<uintptr_t>(value) & 1) != 0; 
     }
 
@@ -57,24 +65,30 @@ private:
      * 
      * @param tid thread id
      * 
-     * @warning to be effective assumes that the thread id is less than 2^31
-     * @warning to be effective for LPRQ implementation the thread id must be unique
+     * @warning correctness assumes that the thread id is less than 2^31
+     * @warning correctness for LPRQ implementation the thread id must be unique
      */
-    inline void* threadLocalBottom(const int tid) const {
+    __attribute__((always_inline)) inline void * threadReserved(const int tid) const {
         return reinterpret_cast<void*>(static_cast<uintptr_t>((tid << 1) | 1));
     }
 
-private:
+    Cell* array; 
+    [[no_unique_address]] const CacheRemap<sizeof(Cell),CACHE_LINE> remap;
+
     //uses the tid argument to be consistent with linked queues
-    PRQueue(size_t size_par, [[maybe_unused]] const int tid, const uint64_t start): Base(),
-    #ifndef DISABLE_POW2
-    sizeRing{(size_par != 1) && detail::isPowTwo(size_par) ? size_par : detail::nextPowTwo(size_par)}, //round up to next power of 2
-    mask{sizeRing - 1},  //sets the mask to perform modulo operation
-#else
+    PRQueue(size_t size_par, [[maybe_unused]] const int tid = 0, const uint64_t start = 0): Base(),
     sizeRing{size_par},
-#endif
-    remap{CacheRemap<sizeof(Cell),CACHE_LINE>(sizeRing)} //initialize the cache remap
+    mask(sizeRing - 1),
+    remap(sizeRing) //initialize the cache remap
     {
+
+#ifdef  DEBUG   //checks for the sizeRing to be a power of 2
+#ifdef  DISABLE_POW2
+        assert(sizeRing > 0);
+#else   
+        assert(sizeRing > 1 && detail::isPowTwo(sizeRing));
+#endif 
+#endif
         array = new Cell[sizeRing];
 
         for(uint64_t i = start; i < start + sizeRing; i++){
@@ -86,14 +100,11 @@ private:
             array[remap[i & mask]].idx.store(i,std::memory_order_relaxed);    
 #endif 
         }
-        Base::head.store(start,std::memory_order_relaxed);
-        Base::tail.store(start,std::memory_order_relaxed);
+
+        Base::setStartIndex(start);
     }
 
 public:
-    //uses the tid argument to be consistent with linked queues
-    PRQueue(size_t size_par, [[maybe_unused]] const int tid = 0): PRQueue(size_par,tid,0){}
-
     ~PRQueue(){
         while(pop(0) != nullptr);
         delete[] array;
@@ -103,6 +114,8 @@ public:
         using namespace std::string_literals;
         return "PRQueue"s + ((padded_cells && padding)? "/padded":"");
     }
+
+private:
 
     /**
      * @brief pushes an item on the queue
@@ -125,6 +138,9 @@ public:
             if (Base::isClosed(tailticket)) {
                 return false;
             }
+
+            void *bottom = threadReserved(tid);  //get the bottom pointer to perform the CAS operation
+
 #ifdef DISABLE_POW2
             Cell& cell = array[remap[tailticket % sizeRing]];
 #else
@@ -136,9 +152,6 @@ public:
             if (val == nullptr){
                 if(nodeIndex(idx) <= tailticket){
                     if((!nodeUnsafe(idx) || Base::head.load() <= tailticket)) {
-
-                        void* bottom = threadLocalBottom(tid);
-
                         if (cell.val.compare_exchange_strong(val, bottom)) {
                             if (cell.idx.compare_exchange_strong(idx, tailticket + sizeRing)) {
                                 if (cell.val.compare_exchange_strong(bottom, item)) {
@@ -181,14 +194,14 @@ public:
 #else
             Cell& cell = array[remap[headticket & mask]];
 #endif
-            int r = 0;
+            int r       = 0;
             uint64_t tt = 0;
 
             while (true) {
-                uint64_t cell_idx = cell.idx.load();
-                uint64_t unsafe = nodeUnsafe(cell_idx);
-                uint64_t idx = nodeIndex(cell_idx);
-                void* val = cell.val.load();
+                uint64_t cell_idx   = cell.idx.load();
+                uint64_t unsafe     = Base::getMSB(cell_idx);
+                uint64_t idx        = Base::get63LSB(cell_idx);
+                void* val           = cell.val.load();
 
                 //inconsistent view of the cell
                 if(cell_idx != cell.idx.load())
@@ -197,7 +210,7 @@ public:
                 if (idx > (headticket + sizeRing))
                     break;
 
-                if ((val != nullptr) && !isBottom(val)) {
+                if ((val != nullptr) && !isReserved(val)) {
                     if (idx == (headticket + sizeRing)) {   //only one dequeuer will pass this condition
                         cell.val.store(nullptr);
                         return static_cast<T*>(val);
@@ -206,7 +219,7 @@ public:
                             if (cell.idx.load() == cell_idx)
                                 break;
                         } else {
-                            if (cell.idx.compare_exchange_strong(cell_idx, setUnsafe(idx)))
+                            if (cell.idx.compare_exchange_strong(cell_idx, Base::setMSB(idx)))
                                 break;
                         }
                     }
@@ -216,7 +229,6 @@ public:
                     if ((r & ((1ull << 8) - 1)) == 0)
                         tt = Base::tail.load();
 
-                    int crq_closed = Base::isClosed(tt);
                     uint64_t t = Base::tailIndex(tt);
                     /**
                      * Conditions: 
@@ -225,9 +237,9 @@ public:
                      * the queue is closed
                      * thread spinning for too long
                      */
-                    if (unsafe || t < (headticket + 1) || crq_closed || (r > 4*1024)) {
+                    if (unsafe || t < (headticket + 1) || Base::isClosed(tt) || (r > (1 << 12))) {
                         //if the value is a bottom pointer, that needs to be cleared (try to clean) and check for enqueue
-                        if (isBottom(val) && !cell.val.compare_exchange_strong(val, nullptr))
+                        if (isReserved(val) && !cell.val.compare_exchange_strong(val, nullptr))
                             continue;
                         //if the cell is unsafe then it's shifted to the next epoch (another dequeuer dequeue will try to fix it)
                         if (cell.idx.compare_exchange_strong(cell_idx, unsafe | (headticket + sizeRing))){
@@ -243,7 +255,7 @@ public:
              * 
              * @note if current segment is closed then the condition is always true
              */
-            if (Base::tailIndex(Base::tail.load()) <= headticket + 1) {
+            if (Base::tailIndex() <= headticket + 1) {
                 Base::fixState();
                 return nullptr;
             }
@@ -259,6 +271,7 @@ public:
     inline size_t length([[maybe_unused]] const int tid = 0) const {
         return Base::length();
     }
+    
 
     friend class LinkedAdapter<T,PRQueue<T,padded_cells>>;   
     friend class BoundedItemAdapter<T,PRQueue<T,padded_cells>>;
@@ -266,13 +279,7 @@ public:
   
 };
 
-/*
-    Declare aliases for Unbounded and Bounded Queues
-*/
-
-
-
-
+// Aliases
 template <typename T>
 #ifdef DISABLE_PADDING
 using BoundedSegmentPRQueue = BoundedSegmentAdapter<T, PRQueue<T, false>>;

@@ -19,6 +19,10 @@ set(HEADER_DIRS
 option (DISABLE_AFFINITY "Disable Thread Pinning to Cores" OFF)
 option (DISABLE_HAZARD "Disable Hazard Pointers" OFF)
 option (DISABLE_POW2 "Disable rounding up to power of 2 for queue size" OFF)
+option (CLUSTER_AWARE "Enable Cluster Aware Benchmarks" OFF)
+option (LENGTH_TRACE "Enable Accurate Length Trace" OFF)
+
+set(CLUSTER_WAIT_TICKS 1000)
 
 
 # -- jemalloc
@@ -29,7 +33,7 @@ pkg_search_module(JEMALLOC REQUIRED jemalloc)
 
 # -- Debug Compile Options -- #
 set(Debug_compile_opt -DDEBUG -O3 -g -fsanitize=address -fsanitize=undefined)
-set(Debug_link -fsanitize=address -lnuma -fsanitize=undefined -fsanitize=address -static-libasan)
+set(Debug_link -fsanitize=address -lnuma -fsanitize=undefined -fsanitize=address)
 
 
 # -- Release Compile Options -- #
@@ -62,6 +66,15 @@ function(add_benchmark exec_name)
         message (STATUS ${exec_name}": Disabling rounding up to power of 2 for queue size")
         target_compile_definitions(${exec_name} PUBLIC DISABLE_POW2)
     endif()
+    if(CLUSTER_AWARE)
+        message (STATUS ${exec_name}": Enabling Cluster Aware Segmentation: ${CLUSTER_WAIT_TICKS} ticks")
+        target_compile_definitions(${exec_name} PUBLIC CLUSTER_AWARE)
+        target_compile_definitions(${exec_name} PUBLIC CLUSTER_WAIT_TICKS=${CLUSTER_WAIT_TICKS})
+    endif()
+    if(LENGTH_TRACE)
+        message (STATUS ${exec_name}": Enabling Accurate Length Trace")
+        target_compile_definitions(${exec_name} PUBLIC LENGTH_TRACE)
+    endif()
 
 
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -75,25 +88,25 @@ endfunction()
 
 # -------------------  Benchmarks  ------------------- #
 
-add_benchmark(OneToMany
-    ${CMAKE_SOURCE_DIR}/src/benchmark/oneToMany.cpp 
-    ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
-)
+# add_benchmark(OneToMany
+#     ${CMAKE_SOURCE_DIR}/src/benchmark/oneToMany.cpp 
+#     ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
+# )
 
-add_benchmark(ManyToOne
-    ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToOne.cpp
-    ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp 
-)
+# add_benchmark(ManyToOne
+#     ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToOne.cpp
+#     ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp 
+# )
 
 add_benchmark(ManyToMany
     ${CMAKE_SOURCE_DIR}/src/benchmark/ManyToMany.cpp 
     ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
 )
 
-add_benchmark(SPSC 
-    ${CMAKE_SOURCE_DIR}/src/All2All/SPSC_bench.cpp
-    ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
-)
+# add_benchmark(SPSC 
+#     ${CMAKE_SOURCE_DIR}/src/All2All/SPSC_bench.cpp
+#     ${CMAKE_SOURCE_DIR}/src/utils/NumaDispatcher.cpp
+# )
 
 add_benchmark(All2All
     ${CMAKE_SOURCE_DIR}/src/All2All/All2All_bench.cpp
@@ -117,6 +130,13 @@ add_executable(timeArray
 )
 target_include_directories(timeArray PUBLIC ${CMAKE_SOURCE_DIR}/include/utils)
 target_compile_options(timeArray PUBLIC -O3)
+
+add_executable(timeTicks
+    ${CMAKE_SOURCE_DIR}/src/utils/timeTicks.cpp
+)
+target_include_directories(timeTicks PUBLIC ${CMAKE_SOURCE_DIR}/include/utils)
+target_compile_options(timeTicks PUBLIC -O3)
+
 
     
 

@@ -109,7 +109,7 @@ long double benchmark(size_t sizeQueue, size_t items, size_t min_wait, size_t ma
                             );
 
 #ifndef DISABLE_AFFINITY
-    NumaDispatcher dispatcher(CACHE_LEVEL);
+    Dispatcher dispatcher(CACHE_LEVEL);
     dispatcher.dispatch_threads(producers,consumers);
 #endif
 
@@ -155,7 +155,7 @@ long double benchmark(size_t sizeQueue, size_t items, size_t min_wait, size_t ma
 void producer_routine(SPSC<Data> &queue, size_t min_wait, size_t max_wait, threadShared &sharedArgs, const int tid){
     sharedArgs.threadsBarrier->arrive_and_wait();
 #ifndef DISABLE_AFFINITY
-    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    (*sharedArgs.threadCluster)[tid] = Dispatcher::get_numa_node();
     sharedArgs.threadsBarrier->arrive_and_wait();
 #endif
     size_t items = sharedArgs.items;
@@ -204,7 +204,7 @@ void producer_routine(SPSC<Data> &queue, size_t min_wait, size_t max_wait, threa
 void consumer_routine(SPSC<Data> &queue, size_t min_wait, size_t max_wait, threadShared &sharedArgs, const int tid){
     sharedArgs.threadsBarrier->arrive_and_wait();
 #ifndef DISABLE_AFFINITY
-    (*sharedArgs.threadCluster)[tid] = NumaDispatcher::get_numa_node();
+    (*sharedArgs.threadCluster)[tid] = Dispatcher::get_numa_node();
     sharedArgs.threadsBarrier->arrive_and_wait();
 #endif
 #ifdef DEBUG

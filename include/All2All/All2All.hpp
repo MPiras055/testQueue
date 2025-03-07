@@ -12,30 +12,33 @@
 template<typename T>
 class All2All {
 private:
-    std::vector<std::vector<std::unique_ptr<SPSC<T>>>> queueMatrix;
+    std::vector<std::vector<std::unique_ptr<SPSC<T>>>> queueMatrix; //matrix[iProducer][jConsumer]
     const size_t producers;
     const size_t consumers;
+    
     /**
-     * Producers and consumers start from the index 0
-     * If a queue is full they switch to the next one
-     * 
-     * The switch happens only on failed push or failed pop
-     * in order to avoid CACHE_trash
+     * each thread mantains a thread_local variables (if the thread does not act as producer & consumer only
+     * one is used) to keep track of the current index where to attempt the next push/pop
      */
-    static inline size_t producer_idx = 0;    //start sending to consumer 0
-    static inline size_t consumer_idx = 0;    //start receiving from consumer 0
+    static inline thread_local size_t current_producer = 0; //used by consumers
+    static inline thread_local size_t current_consumer = 0; //used by producers
 
 public:
-    All2All(size_t sizeQueue,size_t producers_par, size_t consumers_par):
+    All2All(size_t size,size_t producers_par, size_t consumers_par):
     producers{producers_par},
     consumers{consumers_par}
     {
         if(producers == 0 || consumers == 0)
             throw std::invalid_argument("Producers and/or Consumers node must be greater than 0");
 
-        if(sizeQueue == 0)
-            throw std::invalid_argument("Size of underlying queues must be greater than 0");
+        if(size == 0)
+            throw std::invalid_argument("Size of queues must be greater than 0");
 
+        //split the size of the queue in equal parts
+        const size_t sizeQueue = size / (producers * consumers);
+        if(sizeQueue == 0)
+            throw std::invalid_argument("Size of underlying queue too low | need at least " + producers * consumers);
+        
        //initialize the queue matrix
        queueMatrix.reserve(producers);
        for(size_t i = 0; i < producers; i++){
@@ -55,71 +58,57 @@ public:
 
     /**
      * We keep track of the current producer index and we try to push from that queue, if push is successful
-     * then return the item, if not, we circle around the queue updating the 
+     * then return the item, if not, we circle around the queue updating the producer_index variable
+     * 
+     * @note RR scheduling: if the push is successful next push will try from next queue. If failed, circle around the queue
      * 
      * @warning if multiple producer invoke the method with the same tid index then undefined behaviour (Most likely breaks FIFO semantics)
      * 
-     * @note uses 2 forLoops to avoid modulo arithmetic
+     * 
      */
     __attribute__((used,always_inline)) bool inline push(T* item, const int tid){
-        const size_t producer = tid % producers;    //get the producer queueSet
-        size_t cons = producer_idx; //get the current consumer index
+        const int producer = tid % producers;    //get the current producer
 
-        //try push on current consumer
-        if((queueMatrix[producer][cons])->push(item))
-            return true;
-
-        //fallback try other consumers [right]
-        for(size_t i = cons+1; i < consumers; i++){
+        //use 2 for loops to avoid modulo arithmetic
+        for(int i = current_consumer; i < consumers; i++){
             if((queueMatrix[producer][i])->push(item)){
-                producer_idx = i;  //change the current index only on successful push
+                current_consumer = ((i + 1) == producers)? 0 : i;   //update the current index
                 return true;
             }
         }
-        //fallback try other consumers [left]
-        for(size_t i = 0; i < cons; i++){
+        for(int i = 0; i < current_consumer; i++){
             if((queueMatrix[producer][i])->push(item)){
-                producer_idx = i;  //change the current index only on successful push
+                current_consumer = i;   //update the current index [no need for modulo branch since it will always be less]
                 return true;
             }
         }
-        
+        //To keep load balancing next push will check from the last scanned consumer
         return false;
     }
 
-    /**
-     * We keep track of the current producer index and we try to push from that queue, if push is successful
-     * then return the item, if not, we circle around the queue updating the 
-     * 
-     * @warning if multiple producer invoke the method with the same tid index then undefined behaviour (Most likely breaks FIFO semantics)
-     */
     __attribute__((used,always_inline)) inline T* pop(const int tid){
-        const size_t consumer = tid % consumers;    //get the current consumer
-        size_t prod = producer_idx; //get the consumer queueSet
+        const int consumer = tid % consumers;    //get the current consumer
 
-        //try pop on current consumer
-        T* item = (queueMatrix[prod][consumer])->pop();
-        if(item != nullptr) return item;
+        T* item = nullptr;
 
-        //fallback try other producers [right]
-        for(size_t i = prod+1; i < producers; i++){
+        //use 2 for loops to avoid modulo arithmetic
+        for(int i = current_producer; i < producers; i++){
             item = (queueMatrix[i][consumer])->pop();
             if(item != nullptr){
-                consumer_idx = i;  //change the current index only on successful pop
+                //update producer idx 
+                current_producer = ((i + 1) == producers)? 0 : i;   //update the current index
                 return item;
             }
         }
 
-        //fallback try other consumers [left] 
-        for(size_t i = 0; i < prod; i++){
+        for(int i = 0; i < current_producer; i++){
             item = (queueMatrix[i][consumer])->pop();
             if(item != nullptr){
-                consumer_idx = i;  //change the current index only on successful pop
+                current_producer = i;   //update the current index [no need for modulo branch since it will always be less]
                 return item;
             }
         }
-
-        return nullptr;
-
+        //To keep load balancing next pop will check from the last scanned producer
+        return item;
     }
 };

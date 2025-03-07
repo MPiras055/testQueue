@@ -1,18 +1,22 @@
 #pragma once
+
 #include "HazardPointers.hpp"   //includes <atomic and cassert>
-#include <stdexcept>
 #include "Segment.hpp"
+#include "RQCell.hpp"
+#include <string>
 
 #ifndef CACHE_LINE
-#define CACHE_LINE 64
+#define CACHE_LINE 64ul
 #endif
 
 template<class T, class Segment>
 class LinkedAdapter{
 private:
     static constexpr size_t MAX_THREADS = HazardPointers<Segment*>::MAX_THREADS;
-    static constexpr int kHpTail = 0;   //index to access the tail pointer in the HP matrix
-    static constexpr int kHpHead = 1;   //index to access the head pointer in the HP matrix
+
+    //index for HP Matrix
+    static constexpr int kHpTail = 0;
+    static constexpr int kHpHead = 1;
     const size_t sizeRing;
     const size_t maxThreads;
 
@@ -31,12 +35,18 @@ public:
      * @note The constructor initializes the head and tail pointers to a new segment
      */
     LinkedAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
+#ifndef DISABLE_POW2
+    sizeRing{SegmentLength > 1 && detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
+#else
     sizeRing{SegmentLength},
+#endif
     maxThreads{threads},
     HP(2,maxThreads)  
     {
+#ifdef DEBUG
 #ifndef DISABLE_HAZARD
-    assert(maxThreads <= MAX_THREADS);
+        assert(maxThreads <= MAX_THREADS);
+#endif
 #endif
         Segment* sentinel = new Segment(sizeRing,maxThreads,0);
         head.store(sentinel, std::memory_order_relaxed);
@@ -80,24 +90,21 @@ public:
             
             //advance the global head if present
             if (lnext != nullptr) {
-                if(tail.compare_exchange_strong(ltail, lnext)){
-                    ltail = HP.protect(kHpTail, lnext, tid);
-                }
-                else {
-                    ltail = HP.protect(kHpTail, tail.load(), tid);
-                }
+                tail.compare_exchange_strong(ltail, lnext) ?
+                    ltail = HP.protect(kHpTail, lnext, tid) : tail = HP.protect(kHpTail, tail.load(), tid);
                 continue;
             }
 
             //try to push on the current segment
-            if (ltail->push(item, tid)) {
+            if(ltail->push(item, tid)){
                 HP.clear(kHpTail, tid);
                 return;
             }
 
             //if push failed then the segment has been closed so try to create a new segment
             Segment* newTail = new Segment(sizeRing,maxThreads,ltail->getNextSegmentStartIndex());
-            newTail->push(item, tid);
+            newTail->push(item, tid); //when the segment is created the first push is guaranteed to succeed
+
 
             Segment* nullNode = nullptr;
 
@@ -106,12 +113,11 @@ public:
                 tail.compare_exchange_strong(ltail, newTail);   //try to globally set the new tail [not guaranteed]
                 HP.clear(kHpTail, tid);
                 return;
-            } else { 
-                delete newTail;
-            }
+            } else delete newTail;
 
             ltail = HP.protect(kHpTail, nullNode, tid);  
         }
+
     }
 
 
@@ -140,9 +146,12 @@ public:
             //try to pop from the current segment
             item = lhead->pop(tid);
             if (item == nullptr){
+
                 Segment* lnext = lhead->next.load();
                 if (lnext != nullptr){
+                    //if next exists and following pop fails then we can safely assume no further pushs
                     item = lhead->pop(tid);
+
                     if (item == nullptr) {
                         if (head.compare_exchange_strong(lhead, lnext)) {
                             HP.retire(lhead, tid);
@@ -175,8 +184,8 @@ public:
     size_t length(int tid) {
         Segment *lhead = HP.protect(kHpHead,head,tid);
         Segment *ltail = HP.protect(kHpTail,tail,tid);
-        uint64_t t = ltail->getTailIndex();
-        uint64_t h = lhead->getHeadIndex();
+        uint64_t t = ltail->tailIndex();
+        uint64_t h = lhead->headIndex();
         HP.clear(tid);
         return t > h ? t - h : 0;
     }

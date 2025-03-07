@@ -3,9 +3,9 @@
 #include <iostream>
 #include <algorithm>
 #include <numeric>
-#include "AdditionalWork.hpp"
+#include "TicksWait.h"
 
-#define CONVERSION_FACTOR 183 // 100 ns ~= 183 ticks
+#define CONVERSION_FACTOR 648 // 100 ns ~= 648 ticks
 
 int main(int argc, char **argv) {
 
@@ -24,7 +24,6 @@ int main(int argc, char **argv) {
         return 1;
     }
     uint64_t current_center = desired_center/100ull * CONVERSION_FACTOR;
-    uint64_t current_amplitude = current_center / 2;
     int64_t current_checks = 0;
 
     while (true) {
@@ -33,7 +32,7 @@ int main(int argc, char **argv) {
         // Measure and store measurements
         for (uint64_t i = 0; i < runCount; i++) {
             auto start = std::chrono::high_resolution_clock::now();
-            random_work(current_center, current_amplitude);
+            ticks_wait((ticks)current_center);
             auto end = std::chrono::high_resolution_clock::now();
             measurements[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         }
@@ -44,17 +43,15 @@ int main(int argc, char **argv) {
         // Adjust parameters
         if (mean < (desired_center - tolerance)) {
             current_center += current_center / 2;
-            current_amplitude += current_amplitude / 2;
             current_checks = 0;
         } else if (mean > (desired_center + tolerance)) {
             current_center -= current_center / 2;
-            current_amplitude -= current_amplitude / 2;
             current_checks = 0;
         } else if (++current_checks >= max_checks) {
             break;
         }
     }
 
-    std::cout << current_center << "\n" << current_amplitude << std::endl;
+    std::cout << current_center << "\n" << std::endl;
     return 0;
 }

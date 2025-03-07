@@ -5,14 +5,14 @@
 #include "HazardPointers.hpp"
 #include "CacheRemap.hpp"
 
+
 #ifndef CACHE_LINE
-#define CACHE_LINE 64
+#define CACHE_LINE 64ul
 #endif
 
 template<typename T, bool padded_cells>
 class FAAArrayQueue {
 private:
-
     struct Node;
     using Cell = detail::PlainCell<T*,padded_cells>;
     const size_t sizeRing;

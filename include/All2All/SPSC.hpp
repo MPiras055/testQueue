@@ -5,6 +5,11 @@
 #include <stdexcept>
 #include <RQCell.hpp>
 
+
+#ifndef CACHE_LINE
+#define CACHE_LINE 64ul
+#endif
+
 /**
  * Multipush allows a thread to push to a local buffer then to push to the global queue
  */
@@ -18,14 +23,11 @@
 #endif
 #endif
 
-#ifndef CACHE_LINE
-#define CACHE_LINE 64
-#endif
+
 
 template <typename T, bool padded>
 class SPSCQueue {
 private:
-
     alignas(CACHE_LINE) std::atomic<uint64_t> head;
     alignas(CACHE_LINE) std::atomic<uint64_t> tail;
     void **buffer;
@@ -50,16 +52,24 @@ public:
         }
 #endif
 
-        //for aligned_alloc to work the size must be a power of 2 greater equal to the CACHE_LINE
-        assert(size >= CACHE_LINE);
-        assert(detail::isPowTwo(size));
+        /**
+         * to align the buffer to cache line size we need the size of the buffer to be a multiple of the cache line size
+         * if this is not then we need to round up to the nearest size that is a multiple of the cache line size
+         * @note even if the buffer memory size will be greater only [size_par] cells will be used
+         */
 
-        buffer = (void **) aligned_alloc(CACHE_LINE * sizeof(void *),size * sizeof(void *));
+        assert(size > 0);
+        size_t aligned_size = size * sizeof(void *);
+        if((aligned_size & CACHE_LINE) != 0) {
+            aligned_size = (aligned_size + CACHE_LINE) & ~(CACHE_LINE - 1);
+        }
+        
+        buffer = (void **) aligned_alloc(CACHE_LINE, aligned_size);
         if(!buffer)
             throw std::bad_alloc(); 
 
         //init the buffer;
-        std::memset(buffer,0,sizeof(void *)*size);    //set the buffer to null;
+        std::memset(buffer,0,sizeof(void *) * size);    //no need to set more than [size] bytes
         
 
     }
@@ -123,6 +133,9 @@ public:
 
     }
 #ifdef MULTIPUSH
+    /***
+     * experimental code [NOT WORKING YET]
+     */
     __attribute__((always_inline,used)) inline bool multipush() {
         assert(mpush_length <= mpush_size); //check for buffer overflow
         assert(mpush_length <= size); //multipush max size should not exceed the queue size

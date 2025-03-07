@@ -3,11 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cassert>
-#include <iostream>
-#include <thread>
-#include <chrono>
-
-#define CACHE_LINE 64
 
 template <size_t cell_size, size_t cache_line_size>
 class CacheRemap {
@@ -23,7 +18,7 @@ private:
 public:
     CacheRemap(size_t size_par) : size(size_par), numCacheLines((size_par * cell_size) / cache_line_size) {
 #ifdef DEBUG
-        assert(size != 0)
+        assert(size != 0);
         assert(numCacheLines != 0);
 #endif
     }

@@ -5,10 +5,8 @@
 #include <cassert>  //for assert
 
 #ifndef CACHE_LINE
-#define CACHE_LINE 64
+#define CACHE_LINE 64ul
 #endif
-
-
 
 namespace detail{
 
@@ -55,9 +53,31 @@ struct alignas(CACHE_LINE) PlainCell<T,true>{
     char __pad[CACHE_LINE - sizeof(std::atomic<T>)];
 };
 
+
+/**
+ * used for FAA segment, every thread has a length tracker that the thread locally updates
+ * 
+ * whom tries to compute length has to atomically read these counters, and sum them up
+ */
+struct alignas(CACHE_LINE) __length_tracker{
+    std::atomic<uint64_t> itemsPushed{0};
+    std::atomic<uint64_t> itemsPopped{0};
+    char __pad[CACHE_LINE - (2*sizeof(std::atomic<uint64_t>))];
+};
+
+/**
+ * this struct is used to precompute the reserved value (For LPRQ) and stores the numa node
+ * 
+ * useful when pinning threads to numa nodes
+ */
+struct alignas(CACHE_LINE) threadInfo{
+    int numa_node{0};
+    char __pad[CACHE_LINE - (sizeof(int))];
+};
+
 template<class T>
 struct PlainCell<T,false>{
-    std::atomic<T>          val;
+    std::atomic<T> val;
 };
 
 }

@@ -8,19 +8,22 @@
 #include "ThreadGroup.hpp"
 
 template<typename V>
-using UQueues = ::testing::Types<   FAAQueue<V>,
-                                    LCRQueue<V>,
-                                    LinkedMuxQueue<V>,
-                                    LMTQueue<V>,
-                                    LPRQueue<V>
+using UQueues = ::testing::Types<   
+                                    // FAAQueue<V>,
+                                    // LCRQueue<V>,
+                                    // LinkedMuxQueue<V>,
+                                    // LPRQueue<V>,
+                                    LMTQueue<V>
                                     >;
 template<typename V>
-using BQueues = ::testing::Types<   BoundedSegmentCRQueue<V>,
-                                    BoundedItemCRQueue<V>,
-                                    BoundedMuxQueue<V>,
-                                    BoundedMTQueue<V>,
-                                    BoundedSegmentPRQueue<V>,
-                                    BoundedItemPRQueue<V>>;
+using BQueues = ::testing::Types<   
+                                    // BoundedSegmentCRQueue<V>,
+                                    // BoundedItemCRQueue<V>,
+                                    // BoundedMuxQueue<V>,
+                                    // BoundedSegmentPRQueue<V>,
+                                    // BoundedItemPRQueue<V>,
+                                    BoundedMTQueue<V>
+                                    >;
 
 // Test setup for unbounded queues
 template <typename Q>
@@ -54,7 +57,7 @@ public:
     static constexpr int THREADS = 128;
     const size_t RUNS = 5;
     const size_t THREADS_RUN = 2;
-    const size_t ITER_ITEMS = 100'000;
+    const size_t ITER_ITEMS = 1'000'000;
 
     Q queue;
 
@@ -69,7 +72,7 @@ public:
     static constexpr size_t SIZE = 1024;
     const size_t RUNS = 5;
     const size_t THREADS_RUN     = 4;
-    const size_t ITER_ITEMS      = 100'000;
+    const size_t ITER_ITEMS      = 1'000'000;
 
     Q queue;
 

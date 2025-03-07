@@ -4,10 +4,10 @@
 #include "Segment.hpp"
 #include "RQCell.hpp"
 
-#ifndef CACHE_LINE
-#define CACHE_LINE 64
-#endif
 
+#ifndef CACHE_LINE
+#define CACHE_LINE 64ul
+#endif
 
 template<class T, class Segment>
 class BoundedItemAdapter{
@@ -22,6 +22,7 @@ private:
     alignas(CACHE_LINE) std::atomic<Segment*> tail;
     alignas(CACHE_LINE) std::atomic<uint64_t> itemsPushed;
     alignas(CACHE_LINE) std::atomic<uint64_t> itemsPopped;
+    alignas(CACHE_LINE) static inline thread_local bool check_push = false;
     
     HazardPointers<Segment> HP; //Hazard Pointer matrix to ensure no memory leaks on concurrent allocations and deletions
 
@@ -34,16 +35,22 @@ public:
      * The constructor initializes the head and tail pointers to a new segment
      */
     BoundedItemAdapter(size_t SegmentLength, size_t threads = MAX_THREADS):
-    sizeRing{detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
+#ifndef DISABLE_POW2
+    sizeRing{SegmentLength > 1 && detail::isPowTwo(SegmentLength)? SegmentLength : detail::nextPowTwo(SegmentLength)},
+#else
+    sizeRing{SegmentLength},
+#endif
     maxThreads{threads},
     HP(2,maxThreads)    
     {
+#ifdef DEBUG
 #ifndef DISABLE_HAZARD
     assert(maxThreads <= MAX_THREADS);
 #endif
-
-        assert(sizeRing != 0);
+    assert(sizeRing != 0);
+#endif
         Segment* sentinel = new Segment(sizeRing);
+
         head.store(sentinel, std::memory_order_relaxed);
         tail.store(sentinel, std::memory_order_relaxed);
         itemsPushed.store(0, std::memory_order_relaxed);
@@ -75,8 +82,8 @@ public:
     __attribute__((used,always_inline)) bool push(T* item, int tid) {
         Segment* ltail = HP.protect(kHpTail, tail.load(), tid);
         while (true) {
-            //check if it's safe to push [controllo a fronte]
-            if(length() >= sizeRing){
+            //check if it's safe to push
+            if(lengthAcquire() >= sizeRing){
                 HP.clear(kHpTail,tid);
                 return false;
             }
@@ -85,6 +92,7 @@ public:
             //check for tail inconsistency
             Segment* ltail2 = tail.load();
             if (ltail2 != ltail) {
+                check_push = false;
                 ltail = HP.protect(kHpTail, ltail2, tid);
                 continue;
             }
@@ -96,15 +104,19 @@ public:
                     ltail = HP.protect(kHpTail, lnext, tid)
                 :
                     ltail = HP.protect(kHpTail, tail.load(), tid);
+                check_push = false;
                 continue;
             }
             
-            if (ltail->push(item, tid)) {
-                itemsPushed.fetch_add(1,std::memory_order_release); //update the item counter
-                HP.clear(kHpTail, tid);
-                return true;
+            if(check_push) check_push = ltail->isClosed();
+
+            if(!check_push){    //if current tail is closed then don't push
+                if(ltail->push(item,tid)){
+                    itemsPushed.fetch_add(1,std::memory_order_release);
+                    HP.clear(kHpTail,tid);
+                    return true;
+                } else check_push = true;
             }
-            
 
             //if push failed then the segment has been closed so try to create a new segment
             Segment* newTail = new Segment(sizeRing,maxThreads,ltail->getNextSegmentStartIndex());
@@ -116,12 +128,14 @@ public:
             if (ltail->next.compare_exchange_strong(nullNode, newTail)) {
                 itemsPushed.fetch_add(1,std::memory_order_release); //update the item counter [if successful linking]
                 tail.compare_exchange_strong(ltail, newTail);
+                check_push = false;
                 HP.clear(kHpTail, tid);
                 return true;
             }
 
             delete newTail;
             ltail = HP.protect(kHpTail, nullNode, tid);
+            check_push = false;
         }
     }
 
@@ -136,6 +150,8 @@ public:
      */
     __attribute__((used,always_inline)) T* pop(int tid) {
         Segment* lhead = HP.protect(kHpHead, head.load(), tid);
+        T* item = nullptr;
+
         while (true) {
 #ifndef DISABLE_HP
             //check for tail inconsistency
@@ -146,36 +162,29 @@ public:
             }
 #endif
             //try to pop from the current segment
-            T* item = lhead->pop(tid);
-            if (item != nullptr){
-                itemsPopped.fetch_add(1,std::memory_order_release);
-                HP.clear(kHpHead, tid);
-                return item;
-                
-            }
+            if (item = lhead->pop(tid) ; item != nullptr) break;
 
             Segment* lnext = lhead->next.load();
-            if (lnext != nullptr){
-                item = lhead->pop(tid);
-                if (item == nullptr) {
-                    if (head.compare_exchange_strong(lhead, lnext)) {
-                        HP.retire(lhead, tid);
-                        lhead = HP.protect(kHpHead, lnext, tid);
-                    } else{ 
-                        lhead = HP.protect(kHpHead, lhead, tid); 
-                    }  
-                    continue;
-                }
-
-                itemsPopped.fetch_add(1,std::memory_order_release);
+            if (lnext == nullptr){
                 HP.clear(kHpHead, tid);
-                return item;
+                return item;    //at this point it's nullptr [failed extraction]
             }
+                
+
+            if(item = lhead->pop(tid); item != nullptr) break;
             
-            //queue apperas empty
-            HP.clear(kHpHead, tid);
-            return nullptr;       
+            if (head.compare_exchange_strong(lhead, lnext)) {
+                HP.retire(lhead, tid);
+                lhead = HP.protect(kHpHead, lnext, tid);
+            } else{ 
+                lhead = HP.protect(kHpHead, lhead, tid); 
+            }       
+            
         }
+
+        HP.clear(kHpHead, tid);
+        itemsPopped.fetch_add(1,std::memory_order_release);
+        return item;
     }
 
     /**
@@ -200,6 +209,11 @@ public:
      */
     __attribute__((used,always_inline)) inline size_t length([[maybe_unused]] const int tid = 0) const {
         return itemsPushed.load(std::memory_order_relaxed) - itemsPopped.load(std::memory_order_relaxed);
+    }
+
+private:
+    __attribute__((used,always_inline)) inline size_t lengthAcquire() const {
+        return itemsPushed.load(std::memory_order_acquire) - itemsPopped.load(std::memory_order_acquire);
     }
 
 };
